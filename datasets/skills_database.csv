@@ -1,0 +1,26 @@
+skill,category,domain
+Scikit-learn,Framework,AI
+RAG,Generative AI,AI
+LLM,Generative AI,AI
+LLMs,Generative AI,AI
+GAN,Generative AI,AI
+GANs,Generative AI,AI
+FAISS,Vector Database,AI
+HuggingFace,LLM Framework,AI
+Sentence Transformers,NLP Framework,AI
+Ollama,LLM Platform,AI
+OpenCV,Computer Vision,AI
+CLIP,Multimodal AI,AI
+DistilBERT,NLP Model,AI
+Transformers,NLP Framework,AI
+Prompt Engineering,Generative AI,AI
+Streamlit,Deployment Framework,Software
+Flask,Backend Framework,Software
+Git,Version Control,Software
+GitHub,Version Control,Software
+NumPy,Data Science,AI
+Pandas,Data Science,AI
+Semantic Search,NLP Technique,AI
+Multimodal Learning,AI Concept,AI
+CNNs,Deep Learning,AI
+Retrieval-Augmented Generation,Generative AI,AI

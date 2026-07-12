@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint/test deps
+        run: pip install ruff pytest
+
+      - name: Lint (ruff)
+        run: ruff check backend/ --select E9,F63,F7,F82   # errors only for now; tighten later
+
+      - name: Compile all modules
+        run: python -m compileall backend/ -q
+
+      - name: Validator smoke test (no heavy deps needed)
+        run: python -m backend.resume_engine.validate_tailored
+
+      - name: Unit tests
+        # Deliberately light install: analysis/validator/taxonomy tests are
+        # pure-stdlib; tracker tests need sqlalchemy only (importorskip guards
+        # anything heavier). Full requirements.txt (torch etc.) is not needed
+        # to validate the domain logic.
+        run: |
+          pip install sqlalchemy fastapi httpx
+          pytest tests/ -q

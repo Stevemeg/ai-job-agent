@@ -1,0 +1,21 @@
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+
+# Mounted as volumes, not baked into the image
+data/
+uploads/
+
+# Host-side only
+backend/resume_engine/node_modules/
+
+# Docs & assets don't belong in the runtime image
+docs/
+assets/
+tests/
+*.md

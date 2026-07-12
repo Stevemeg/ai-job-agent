@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" font-family="Segoe UI, Arial, sans-serif" role="img" aria-label="System architecture">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0 0 L10 4 L0 8 Z" fill="#5b5bd6"/>
+    </marker>
+  </defs>
+  <rect width="960" height="560" fill="#fbfbfe"/>
+  <text x="480" y="38" font-size="22" font-weight="700" fill="#1a1a2e" text-anchor="middle">Universal AI Job Agent — System Architecture</text>
+
+  <!-- column 1: resume side -->
+  <g text-anchor="middle" font-size="14">
+    <rect x="60" y="80" width="190" height="46" rx="10" fill="#eeeefb" stroke="#5b5bd6"/>
+    <text x="155" y="108" fill="#1a1a2e">Resume PDF</text>
+
+    <rect x="60" y="166" width="190" height="56" rx="10" fill="#fff" stroke="#c6c6e8"/>
+    <text x="155" y="189" font-weight="600" fill="#1a1a2e">Resume Engine</text>
+    <text x="155" y="207" font-size="11.5" fill="#6e6e85">parse · confidence · review</text>
+
+    <rect x="60" y="262" width="190" height="56" rx="10" fill="#fff" stroke="#c6c6e8"/>
+    <text x="155" y="285" font-weight="600" fill="#1a1a2e">Analysis Engine</text>
+    <text x="155" y="303" font-size="11.5" fill="#6e6e85">health · gaps · careers</text>
+  </g>
+
+  <!-- column 2: job side -->
+  <g text-anchor="middle" font-size="14">
+    <rect x="710" y="80" width="190" height="46" rx="10" fill="#e9f7ef" stroke="#30a46c"/>
+    <text x="805" y="108" fill="#1a1a2e">ATS Board APIs</text>
+
+    <rect x="710" y="166" width="190" height="56" rx="10" fill="#fff" stroke="#c6c6e8"/>
+    <text x="805" y="189" font-weight="600" fill="#1a1a2e">Job Engine</text>
+    <text x="805" y="207" font-size="11.5" fill="#6e6e85">collect · dedupe · 3,875 jobs</text>
+  </g>
+
+  <!-- center: matching -->
+  <g text-anchor="middle" font-size="14">
+    <rect x="365" y="238" width="230" height="80" rx="12" fill="#5b5bd6"/>
+    <text x="480" y="270" font-weight="700" fill="#fff">Matching Engine</text>
+    <text x="480" y="292" font-size="11.5" fill="#d8d8f8">hard gates · weighted score · explain</text>
+
+    <rect x="365" y="368" width="230" height="56" rx="10" fill="#fff" stroke="#c6c6e8"/>
+    <text x="480" y="391" font-weight="600" fill="#1a1a2e">Application Engine</text>
+    <text x="480" y="409" font-size="11.5" fill="#6e6e85">tailor · validate · cover letter</text>
+
+    <rect x="365" y="464" width="230" height="52" rx="10" fill="#fff7ec" stroke="#f5a623"/>
+    <text x="480" y="486" font-weight="600" fill="#1a1a2e">Tracker (PostgreSQL)</text>
+    <text x="480" y="504" font-size="11.5" fill="#6e6e85">event-sourced outcomes</text>
+  </g>
+
+  <!-- clients -->
+  <g text-anchor="middle" font-size="13">
+    <rect x="60" y="392" width="190" height="46" rx="10" fill="#f1f1f6" stroke="#9a9ac0"/>
+    <text x="155" y="420" fill="#1a1a2e">Streamlit UI</text>
+    <rect x="710" y="392" width="190" height="46" rx="10" fill="#f1f1f6" stroke="#9a9ac0"/>
+    <text x="805" y="420" fill="#1a1a2e">FastAPI /v1 · /docs</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#5b5bd6" stroke-width="2" fill="none" marker-end="url(#arr)">
+    <path d="M155 126 V162"/>
+    <path d="M155 222 V258"/>
+    <path d="M250 290 H361"/>
+    <path d="M805 126 V162"/>
+    <path d="M805 222 Q805 278 599 278"/>
+    <path d="M480 318 V364"/>
+    <path d="M480 424 V460"/>
+    <path d="M250 415 Q330 415 380 428"/>
+    <path d="M710 415 Q630 415 580 428"/>
+  </g>
+  <g font-size="11" fill="#6e6e85">
+    <text x="300" y="278">profile</text>
+    <text x="640" y="262">jobs</text>
+    <text x="492" y="346">ranked + explained</text>
+  </g>
+
+  <text x="480" y="548" font-size="11" fill="#9a9ac0" text-anchor="middle">Presentation → Domain → config · engines are UI-agnostic · LLM output deterministically validated</text>
+</svg>

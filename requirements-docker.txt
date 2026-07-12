@@ -1,0 +1,35 @@
+# Curated dependency set for the Docker image.
+#
+# WHY NOT requirements.txt: that file is a full venv freeze from the Windows
+# dev machine -- it pins platform-specific builds and dev-only packages that
+# bloat (or break) a Linux image build. This list is the actual runtime
+# surface of the containerized services (API + UI + ranking).
+#
+# NOT included, by design:
+#   - ollama client needs: resume tailoring talks to Ollama over HTTP
+#     (host.docker.internal:11434); no Python package required.
+#   - Node/docx: document generation is CLI-only today and runs host-side.
+
+# API
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9          # file uploads
+
+# UI
+streamlit>=1.35
+
+# Parsing
+PyMuPDF>=1.24
+pandas>=2.0
+
+# Matching / ranking
+sentence-transformers>=2.7
+scikit-learn>=1.4
+numpy>=1.26
+
+# Database
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+
+# Shared
+requests>=2.31

@@ -1,0 +1,25 @@
+# Streamlit theme — the app's design system (backend/ui/theme.py) is built
+# for a light palette. Setting the theme HERE (not via CSS overrides) makes
+# every native widget (uploader, expanders, tabs, forms, sidebar) follow the
+# same palette, regardless of the user's OS dark-mode preference.
+#
+# This fixes white-on-white text when the user's Streamlit defaulted to dark.
+
+[theme]
+base = "light"
+primaryColor = "#5B5BD6"
+backgroundColor = "#F7F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1A1A2E"
+font = "sans serif"
+
+[server]
+maxUploadSize = 10          # MB — matches the API's resume-upload cap
+
+# Streamlit's hot-reload watcher introspects every imported module; once
+# the in-app re-rank loads `transformers`, that triggers its lazy imports
+# of every model family — some need torchvision etc. and crash-spam the
+# console (thousands of traceback lines). The watcher is a dev convenience,
+# not a product feature: disable it. (When developing UI code, restart the
+# app after edits, or launch with --server.fileWatcherType auto.)
+fileWatcherType = "none"

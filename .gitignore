@@ -1,0 +1,38 @@
+# --- Personal data: never commit ---
+uploads/
+data/candidate_profile.json
+data/candidate_profile.json.bak
+data/ranked_jobs.json
+data/resume_*.docx
+data/cover_letter_*
+backend/database/.env
+.env
+# Streamlit secrets (GROQ_API_KEY lives here locally) — NEVER commit
+.streamlit/secrets.toml
+
+# Keep the corpus shareable but large — decide per-repo; default: exclude
+data/jobs.json
+# ...but always ship the committable sample corpus (120 real postings)
+!data/sample_jobs.json
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# --- Node ---
+backend/resume_engine/node_modules/
+npm-debug.log
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- ML caches ---
+.cache/
+*.safetensors
