@@ -24,16 +24,34 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 Base = declarative_base()
 
 
+import os
+
+
 def _build_db_url():
-    """Reads connection params from env vars, with the same defaults as
-    docker-compose.yml so a fresh `docker compose up` + `python db.py` just
-    works with zero extra config for local dev."""
+    """
+    Build the SQLAlchemy database URL.
+
+    Priority:
+    1. DATABASE_URL (Render / Neon / Production)
+    2. Individual DB_* variables (Local Docker / Development)
+    """
+
+    database_url = os.environ.get("DATABASE_URL")
+
+    if database_url:
+        # Render + Neon provide this
+        return database_url
+
     user = os.environ.get("DB_USER", "ai_job_agent")
     password = os.environ.get("DB_PASSWORD", "dev_password_change_me")
     host = os.environ.get("DB_HOST", "localhost")
     port = os.environ.get("DB_PORT", "5432")
     name = os.environ.get("DB_NAME", "ai_job_agent")
-    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
+
+    return (
+        f"postgresql+psycopg2://"
+        f"{user}:{password}@{host}:{port}/{name}"
+    )
 
 
 _engine = None
