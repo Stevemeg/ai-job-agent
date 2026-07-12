@@ -33,5 +33,5 @@ jobs:
         # anything heavier). Full requirements.txt (torch etc.) is not needed
         # to validate the domain logic.
         run: |
-          pip install sqlalchemy fastapi httpx
+          pip install sqlalchemy fastapi httpx python-multipart
           pytest tests/ -q
