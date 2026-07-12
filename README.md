@@ -2,7 +2,7 @@
 
 <img src="assets/banner.svg" alt="Universal AI Job Acquisition Agent" width="100%">
 
-# 🎯 Universal AI Job Acquisition Agent
+#  Universal AI Job Acquisition Agent
 
 **An AI career-intelligence platform that parses your resume, scores it honestly, finds your skill gaps from real market data, and ranks thousands of real jobs against your actual profile — with every score explainable.**
 
@@ -20,7 +20,7 @@
 
 ---
 
-## 📖 Table of Contents
+##  Table of Contents
 
 - [The Problem](#-the-problem)
 - [The Solution](#-the-solution)
@@ -41,11 +41,11 @@
 
 ---
 
-## 🔥 The Problem
+##  The Problem
 
 Job searching is broken. Candidates manually search a dozen portals with inconsistent filters, apply blindly to low-probability roles, get silently rejected by ATS parsers, and never learn *why*. There is no unified intelligence layer that understands the candidate's profile, the market, and the gap between them.
 
-## 💡 The Solution
+##  The Solution
 
 A single pipeline that acts as an **AI career coach**, not a job board:
 
@@ -55,7 +55,7 @@ Upload Resume → Review Extraction → Resume Intelligence → Job Intelligence
 
 It understands the candidate first (health score, skill gaps, career fit), then ranks real jobs from legal ATS sources against that understanding — and explains every number it shows.
 
-## ✨ Features
+##  Features
 
 **Resume Intelligence**
 - PDF resume parsing: contact, links, education, skills, projects → structured `candidate_profile.json`
@@ -84,7 +84,7 @@ It understands the candidate first (health score, skill gaps, career fit), then 
 - **Dual LLM backend, auto-selected:** Ollama/Mistral locally (fully private), Groq `llama-3.3-70b-versatile` in deployment — same prompts, same validator either way
 - **Application Tracker:** event-sourced pipeline (saved → applied → interview → offer) with notes and timelines; every event snapshots the match score — the training data for future learning-to-rank
 
-## 🧭 Design Principles
+##  Design Principles
 
 1. **Explainable over impressive.** Every score decomposes into visible sub-scores and findings.
 2. **Honest numbers only.** Skill-gap demand comes from the collected corpus, not invented "+15%" claims. When a sample is too small to trust, the UI says so.
@@ -92,7 +92,7 @@ It understands the candidate first (health score, skill gaps, career fit), then 
 4. **Legal sourcing only.** ATS board APIs, not scraping LinkedIn/Indeed/Naukri.
 5. **Analysis logic is UI-agnostic.** `backend/analysis/` is pure functions — the Streamlit app renders them today; a FastAPI service can expose them tomorrow with zero rewrite.
 
-## 🏗 Architecture
+##  Architecture
 
 <img src="assets/architecture.svg" alt="System architecture" width="100%">
 
@@ -134,7 +134,7 @@ flowchart TB
 
 Full architecture documentation with sequence, component, and data-flow diagrams: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
-## 📸 Screenshots
+##  Screenshots
 
 <!-- Replace placeholders with real captures — see assets/README.md for the shot list and captions -->
 
@@ -148,7 +148,7 @@ Full architecture documentation with sequence, component, and data-flow diagrams
 
 <!-- Demo GIF placeholder: assets/demo.gif (record: upload → review → dashboard → jobs) -->
 
-## ⚙️ Installation
+##  Installation
 
 ### Fastest: Docker (full stack, one command)
 
@@ -182,7 +182,7 @@ ollama pull mistral                      # resume tailoring + cover letters
 cd backend/database && docker compose up -d && cd ../..   # outcome logging
 ```
 
-## 🚀 Running the Project
+##  Running the Project
 
 Always run from the project root.
 
@@ -211,7 +211,7 @@ python -m backend.resume_engine.cover_letter --rank 1
 python -m backend.database.log_outcome_cli
 ```
 
-## 📟 Example Output
+##  Example Output
 
 ```
 Jobs remaining after dedup + hard gates: 1,245 / 3,875 (32.1%)
@@ -227,7 +227,7 @@ HALLUCINATION VALIDATOR
    -> Falling back to original bullets
 ```
 
-## 📊 Results
+##  Results
 
 All numbers below are real outputs from the current corpus and test profile — see **[docs/RESULTS.md](docs/RESULTS.md)** for full tables and the evaluation-metric wishlist.
 
@@ -242,7 +242,7 @@ All numbers below are real outputs from the current corpus and test profile — 
 | Hallucination validator | Caught 3 fabricated tools + 2 fabricated metrics in adversarial test; 0 false positives on truthful rewrites |
 | Test suite | 68 behavior-focused tests, green in CI |
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 AI_JOB_AGENT/
@@ -278,7 +278,7 @@ Python 3.11 · sentence-transformers (`all-MiniLM-L6-v2`) · scikit-learn · PyM
 
 **Current capabilities**
 
-✅ Resume Intelligence (parsing, confidence, review & edit) · ✅ AI Career Analysis (health score, career paths) · ✅ Skill Gap Detection (corpus-driven, role-weighted) · ✅ Explainable Job Matching (3,875-job corpus, hard gates, sub-scores) · ✅ In-App Resume Tailoring (hallucination-validated) · ✅ Cover Letter Generation · ✅ Application Tracking (event-sourced) · ✅ REST API (13 endpoints, `/docs`) · ✅ Dual LLM Backend (Ollama dev / Groq prod) · ✅ Automated Test Suite (68 tests) · ✅ Continuous Integration · ✅ Dockerized Full Stack
+ Resume Intelligence (parsing, confidence, review & edit) ·  AI Career Analysis (health score, career paths) ·  Skill Gap Detection (corpus-driven, role-weighted) ·  Explainable Job Matching (3,875-job corpus, hard gates, sub-scores) ·  In-App Resume Tailoring (hallucination-validated) ·  Cover Letter Generation ·  Application Tracking (event-sourced) ·  REST API (13 endpoints, `/docs`) ·  Dual LLM Backend (Ollama dev / Groq prod) ·  Automated Test Suite (68 tests) ·  Continuous Integration ·  Dockerized Full Stack
 
 **Upcoming**
 
@@ -288,26 +288,26 @@ Python 3.11 · sentence-transformers (`all-MiniLM-L6-v2`) · scikit-learn · PyM
 
 | Status | Milestone |
 |---|---|
-| ✅ | Legal ATS sourcing · Postgres events · structured requirement gates · alias + category skill matching · resume tailoring · hallucination validator · cover letters · upload-first UI with Review & Edit |
-| 🔄 | Outcome logging at scale (prerequisite for learning-to-rank) |
-| 📋 | FastAPI service layer · experience/certification extraction · application tracker UI · more ATS sources (Adzuna) |
-| 🔮 | Learning-to-rank from real outcomes · multi-domain skill taxonomies · auto-apply agent |
+|  | Legal ATS sourcing · Postgres events · structured requirement gates · alias + category skill matching · resume tailoring · hallucination validator · cover letters · upload-first UI with Review & Edit |
+|  | Outcome logging at scale (prerequisite for learning-to-rank) |
+|  | FastAPI service layer · experience/certification extraction · application tracker UI · more ATS sources (Adzuna) |
+|  | Learning-to-rank from real outcomes · multi-domain skill taxonomies · auto-apply agent |
 
 Detailed roadmap: **[docs/ROADMAP.md](docs/ROADMAP.md)**
 
-## 🤝 Contributing
+##  Contributing
 
 Contributions welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)**. Good first issues: extending `MARKET_SKILLS`, adding role archetypes for new domains, and new Greenhouse/Ashby company slugs.
 
-## 📄 License
+##  License
 
 MIT — see [LICENSE](LICENSE).
 
-## 📬 Contact
+##  Contact
 
 **Kona Bharath Vamshidhar Reddy**
 B.E. Artificial Intelligence & Machine Learning · Acharya Institute of Technology
-📧 konabharath2004@gmail.com · [LinkedIn](https://www.linkedin.com/in/kona-bharath-vamshidhar-reddy/) · [GitHub](https://github.com/Stevemeg)
+ konabharath2004@gmail.com · [LinkedIn](https://www.linkedin.com/in/kona-bharath-vamshidhar-reddy/) · [GitHub](https://github.com/Stevemeg)
 
 ---
 
