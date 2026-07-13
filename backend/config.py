@@ -16,6 +16,9 @@ DATASETS_DIR = ROOT / "datasets"
 
 SKILLS_DB = DATASETS_DIR / "skills_database.csv"
 JOBS_FILE = DATA_DIR / "jobs.json"
+# Committed to git (unlike JOBS_FILE) specifically so deployed instances that
+# never ran the ATS collector still have something to rank/browse against.
+SAMPLE_JOBS_FILE = DATA_DIR / "sample_jobs.json"
 PROFILE_FILE = DATA_DIR / "candidate_profile.json"
 RANKED_FILE = DATA_DIR / "ranked_jobs.json"
 

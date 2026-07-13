@@ -5,7 +5,7 @@ import json
 
 from fastapi import HTTPException
 
-from ..config import PROFILE_FILE, JOBS_FILE, RANKED_FILE
+from ..config import PROFILE_FILE, JOBS_FILE, SAMPLE_JOBS_FILE, RANKED_FILE
 
 
 def load_profile() -> dict:
@@ -22,11 +22,15 @@ _jobs_cache: dict = {"key": None, "jobs": []}
 
 
 def load_jobs() -> list[dict]:
-    if not JOBS_FILE.exists():
+    # Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only. Cloud
+    # deployments that never ran the collector fall back to the small
+    # committed sample corpus so ranking/browsing still works out of the box.
+    active = JOBS_FILE if JOBS_FILE.exists() else SAMPLE_JOBS_FILE
+    if not active.exists():
         return []
-    key = (str(JOBS_FILE), JOBS_FILE.stat().st_mtime)
+    key = (str(active), active.stat().st_mtime)
     if _jobs_cache["key"] != key:
-        with open(JOBS_FILE, "r", encoding="utf-8") as f:
+        with open(active, "r", encoding="utf-8") as f:
             _jobs_cache["jobs"] = json.load(f)
         _jobs_cache["key"] = key
     return _jobs_cache["jobs"]

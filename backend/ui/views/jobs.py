@@ -12,8 +12,19 @@ import json
 
 import streamlit as st
 
-from backend.config import RANKED_FILE, JOBS_FILE
+from backend.config import RANKED_FILE, JOBS_FILE, SAMPLE_JOBS_FILE
 from .. import theme
+
+
+def _active_jobs_file():
+    """Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only.
+    Deployed instances that never ran the collector fall back to the small
+    committed sample corpus so the Jobs tab still works out of the box."""
+    if JOBS_FILE.exists():
+        return JOBS_FILE
+    if SAMPLE_JOBS_FILE.exists():
+        return SAMPLE_JOBS_FILE
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -23,8 +34,8 @@ def _load_ranked(mtime: float) -> list[dict]:
 
 
 @st.cache_data(show_spinner=False)
-def _load_descriptions(mtime: float) -> dict:
-    with open(JOBS_FILE, "r", encoding="utf-8") as f:
+def _load_descriptions(path_str: str, mtime: float) -> dict:
+    with open(path_str, "r", encoding="utf-8") as f:
         jobs = json.load(f)
     out = {}
     for j in jobs:
@@ -34,9 +45,9 @@ def _load_descriptions(mtime: float) -> dict:
     return out
 
 
-def _rerank_inline(profile: dict) -> None:
+def _rerank_inline(profile: dict, jobs_file) -> None:
     from backend.matching_engine.matcher import rank_jobs
-    with open(JOBS_FILE, "r", encoding="utf-8") as f:
+    with open(jobs_file, "r", encoding="utf-8") as f:
         jobs = json.load(f)
     with st.spinner(f"Ranking {len(jobs):,} jobs against your profile — "
                     "this takes a few minutes (embedding model)..."):
@@ -48,6 +59,13 @@ def _rerank_inline(profile: dict) -> None:
 
 
 def render(profile: dict) -> None:
+    jobs_file = _active_jobs_file()
+    if jobs_file == SAMPLE_JOBS_FILE:
+        st.info("Running on the sample corpus (120 jobs) — this deployment "
+                "doesn't have the full scraped dataset. Run "
+                "`python -m backend.job_scraper.ats_collector` locally for "
+                "the full 3,875-job corpus.")
+
     if st.session_state.pop("profile_just_parsed", False) and RANKED_FILE.exists():
         st.info("Your resume was re-analyzed. Rankings below may be from the "
                 "previous profile — re-rank to refresh.")
@@ -55,16 +73,16 @@ def render(profile: dict) -> None:
     if not RANKED_FILE.exists():
         st.markdown('<p class="uja-muted">No job rankings yet.</p>',
                     unsafe_allow_html=True)
-        if JOBS_FILE.exists() and st.button("Rank jobs now", type="primary"):
-            _rerank_inline(profile)
-        if not JOBS_FILE.exists():
+        if jobs_file and st.button("Rank jobs now", type="primary"):
+            _rerank_inline(profile, jobs_file)
+        if not jobs_file:
             st.error("No jobs.json found. Run the collector first: "
                      "`python -m backend.job_scraper.ats_collector`")
         return
 
     ranked = _load_ranked(RANKED_FILE.stat().st_mtime)
-    descriptions = (_load_descriptions(JOBS_FILE.stat().st_mtime)
-                    if JOBS_FILE.exists() else {})
+    descriptions = (_load_descriptions(str(jobs_file), jobs_file.stat().st_mtime)
+                    if jobs_file else {})
 
     # Filters
     f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
@@ -80,7 +98,7 @@ def render(profile: dict) -> None:
         top_n = st.number_input("Show top N", 10, len(ranked),
                                 min(30, len(ranked)), 10)
     if st.button("Re-rank against current resume"):
-        _rerank_inline(profile)
+        _rerank_inline(profile, jobs_file)
 
     filtered = [r for r in ranked if r["match_score"] >= min_score]
     if company_filter:
