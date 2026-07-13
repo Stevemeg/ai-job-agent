@@ -13,7 +13,9 @@ from pathlib import Path
 import streamlit as st
 
 from backend.config import PROFILE_FILE
-from backend.resume_parser.api import parse_resume_pdf, save_profile
+# resume_parser.api pulls in PyMuPDF (fitz) -- a native C extension that has
+# no business loading at Streamlit boot for every tab/page. Deferred into
+# _parse_and_advance() so it only loads when a resume is actually uploaded.
 
 
 def render() -> None:
@@ -46,6 +48,7 @@ def render() -> None:
 
 
 def _parse_and_advance(uploaded) -> None:
+    from backend.resume_parser.api import parse_resume_pdf, save_profile
     with st.spinner("Parsing your resume..."):
         try:
             with tempfile.NamedTemporaryFile(suffix=".pdf",

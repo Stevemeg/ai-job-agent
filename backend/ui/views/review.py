@@ -16,7 +16,8 @@ import re
 import streamlit as st
 
 from backend.analysis.parse_confidence import compute_parse_confidence
-from backend.resume_parser.api import save_profile
+# resume_parser.api pulls in PyMuPDF (fitz) -- deferred into render()'s
+# submit branch so it doesn't load at Streamlit boot for every tab/page.
 from .. import theme
 
 
@@ -109,6 +110,7 @@ def render(profile: dict) -> None:
                                           use_container_width=True)
 
     if submitted:
+        from backend.resume_parser.api import save_profile
         skills = []
         for line in skills_text.splitlines():
             skill = line.strip()

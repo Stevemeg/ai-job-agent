@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.config import PROFILE_FILE, JOBS_FILE                # noqa: E402
+from backend.config import PROFILE_FILE, JOBS_FILE, SAMPLE_JOBS_FILE  # noqa: E402
 from backend.ui import theme                                      # noqa: E402
 from backend.ui.views import landing, review, analysis, jobs, tracker  # noqa: E402
 
@@ -48,10 +48,21 @@ def _load_profile() -> dict | None:
         return json.load(f)
 
 
+def _active_jobs_file() -> Path | None:
+    # Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only.
+    # Deployed instances fall back to the small committed sample corpus.
+    if JOBS_FILE.exists():
+        return JOBS_FILE
+    if SAMPLE_JOBS_FILE.exists():
+        return SAMPLE_JOBS_FILE
+    return None
+
+
 def _load_jobs() -> list[dict]:
-    if not JOBS_FILE.exists():
+    jobs_file = _active_jobs_file()
+    if jobs_file is None:
         return []
-    with open(JOBS_FILE, "r", encoding="utf-8") as f:
+    with open(jobs_file, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -90,7 +101,8 @@ with st.sidebar:
 # ---- dashboard ---------------------------------------------------------------
 
 all_jobs = _load_jobs()
-jobs_mtime = JOBS_FILE.stat().st_mtime if JOBS_FILE.exists() else 0.0
+_active_file = _active_jobs_file()
+jobs_mtime = _active_file.stat().st_mtime if _active_file else 0.0
 results = analysis.cached_analysis(profile, jobs_mtime, all_jobs)
 
 analysis.render_hero(profile, results)
