@@ -23,4 +23,3 @@ maxUploadSize = 10          # MB — matches the API's resume-upload cap
 # not a product feature: disable it. (When developing UI code, restart the
 # app after edits, or launch with --server.fileWatcherType auto.)
 fileWatcherType = "none"
-python-3.11
