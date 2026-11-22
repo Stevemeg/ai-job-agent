@@ -207,6 +207,13 @@ def _probe_error() -> Exception | None:
         return exc
 
 
+def probe_database() -> Exception | None:
+    """Why a configured database can't be reached right now (short connect
+    timeout), or None if it answered. Never cached -- for startup checks
+    such as the worker's, not per-request use."""
+    return _probe_error()
+
+
 def _probe() -> bool:
     exc = _probe_error()
     if exc is not None:
