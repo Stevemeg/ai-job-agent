@@ -31,5 +31,11 @@ numpy>=1.26
 sqlalchemy>=2.0
 psycopg2-binary>=2.9
 
+# Scheduler (python -m backend.scheduler). Pinned to 3.x: 4.0 is a rewrite
+# with a different job-store model. tzdata guarantees the Asia/Kolkata zone
+# even on an image without the system tz database.
+apscheduler>=3.10,<4
+tzdata
+
 # Shared
 requests>=2.31

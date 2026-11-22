@@ -56,10 +56,12 @@ jobs:
       - name: Install test deps
         # Deliberately light install: analysis/validator/taxonomy tests are
         # pure-stdlib; tracker/corpus tests need sqlalchemy + psycopg2; the
-        # collector tests need requests + bs4 (importorskip guards anything
-        # heavier). Full requirements.txt (torch etc.) is not needed to
-        # validate the domain logic.
-        run: pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4
+        # collector tests need requests + bs4; the scheduler tests need
+        # APScheduler 3.x (importorskip guards anything heavier). Full
+        # requirements.txt (torch etc.) is not needed to validate the domain
+        # logic: the ranking tests run the real matcher with the embedding
+        # similarity stubbed.
+        run: pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
 
       - name: Unit tests
         run: pytest -q -rs -m "not db"
