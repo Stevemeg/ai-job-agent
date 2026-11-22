@@ -36,7 +36,7 @@ from typing import Any, Iterator
 from ..config import PROFILE_FILE, RANKED_FILE
 from ..database.corpus import (load_corpus_rows, load_corpus_snapshot,
                                require_database, write_json_atomic)
-from . import scoring
+from . import scoring, task_status
 
 log = logging.getLogger(__name__)
 
@@ -171,55 +171,25 @@ def latest_rank_task() -> dict | None:
                                  concurrency_key=RANK_CONCURRENCY_KEY)
 
 
-def _error_summary(last_error: str | None) -> str:
-    """The 'Type: message' paragraph of a worker-recorded error (the
-    traceback after the blank line stays in the tasks row)."""
-    return (last_error or "").split("\n\n", 1)[0].strip()
-
-
 def status_from_task(task: dict | None, ranked_file_exists: bool) -> dict:
     """Map the latest rank task onto the RankingStatus contract
     (state: idle | running | done | failed), unchanged from v1:
 
-      no task       -> done "loaded from previous run" if RANKED_FILE
-                       exists, else idle
-      queued        -> running (waiting for a worker)
-      running       -> running
-      running, lease expired
-                    -> running, "stalled -- waiting for a worker to
-                       reclaim" (its worker died or hung; the next claim
-                       takes it over, or marks it dead on its last attempt)
-      queued again  -> running, "retrying" (an attempt failed)
-      succeeded     -> done, ranked_count from the task result
-      dead          -> failed, detail = the last error
+      no task    -> done "loaded from previous run" if RANKED_FILE exists,
+                    else idle
+      any task   -> task_status.describe() (queued / retrying / stalled /
+                    running -> running; dead -> failed with the last error)
+      succeeded  -> done, ranked_count from the task result
     """
     if task is None:
         if ranked_file_exists:
             return {"state": "done", "detail": "loaded from previous run",
                     "ranked_count": None}
         return {"state": "idle", "detail": "", "ranked_count": None}
-
-    tid, n, m = task["id"], task["attempts"], task["max_attempts"]
-    status = task["status"]
-    if status == "queued" and n == 0:
-        detail = f"Task #{tid} queued, waiting for a worker (attempt 0/{m})."
-    elif status == "queued":
-        detail = (f"Task #{tid} retrying: attempt {n}/{m} failed "
-                  f"({_error_summary(task.get('last_error'))}).")
-    elif status == "running" and task.get("lease_expired"):
-        detail = (f"Task #{tid} stalled — waiting for a worker to reclaim "
-                  f"(attempt {n}/{m}, lease expired).")
-    elif status == "running":
-        detail = f"Task #{tid} running (attempt {n}/{m})."
-    elif status == "succeeded":
-        return {"state": "done", "detail": "",
-                "ranked_count": (task.get("result") or {}).get("ranked_count")}
-    else:                                   # dead (or the unused 'failed')
-        return {"state": "failed",
-                "detail": _error_summary(task.get("last_error"))
-                or f"Task #{tid} failed after {n}/{m} attempts.",
-                "ranked_count": None}
-    return {"state": "running", "detail": detail, "ranked_count": None}
+    state, detail = task_status.describe(task)
+    ranked_count = ((task.get("result") or {}).get("ranked_count")
+                    if state == "done" else None)
+    return {"state": state, "detail": detail, "ranked_count": ranked_count}
 
 
 def ranking_status(ranked_file_exists: bool) -> dict:
