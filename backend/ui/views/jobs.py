@@ -5,6 +5,15 @@ Reads data/ranked_jobs.json when available (instant). If the profile was
 just re-parsed or no ranked file exists, offers an explicit "Rank jobs now"
 button -- ranking 3,875 jobs loads the embedding model and takes minutes,
 so it must never run implicitly on page load.
+
+Two ways a ranking runs (ADR-001 §2):
+- Database configured (DATABASE_URL / DB_HOST): the buttons enqueue a "rank"
+  task through services.ranking.request_ranking() -- the same path as
+  POST /v1/rankings -- and the page polls the task's status. The worker
+  (python -m backend.worker) is the only writer of ranked_jobs.json.
+- No database (the Streamlit Cloud demo): _rerank_inline() ranks in this
+  process. It is the ONLY in-process ranking path left, and exists because
+  a DB-less deployment has no queue and no worker.
 """
 from __future__ import annotations
 
@@ -13,8 +22,11 @@ import json
 import streamlit as st
 
 from backend.config import RANKED_FILE
-from backend.database.corpus import load_corpus, load_corpus_snapshot
+from backend.database.corpus import (db_configured, load_corpus,
+                                     load_corpus_snapshot, write_json_atomic)
 from .. import theme
+
+RANK_POLL_S = 5          # status refresh while a queued ranking runs
 
 
 @st.cache_data(show_spinner=False)
@@ -36,15 +48,85 @@ def _load_descriptions(corpus_version: tuple, _jobs: list[dict]) -> dict:
 
 
 def _rerank_inline(profile: dict) -> None:
+    """Demo mode only (no database configured): rank in this process."""
     from backend.matching_engine.matcher import rank_jobs
     jobs = load_corpus()
     with st.spinner(f"Ranking {len(jobs):,} jobs against your profile — "
                     "this takes a few minutes (embedding model)..."):
         ranked = rank_jobs(profile, jobs, candidate_is_fresher=True)
-    with open(RANKED_FILE, "w", encoding="utf-8") as f:
-        json.dump(ranked, f, ensure_ascii=False, indent=2)
+    # Atomic replace: two demo sessions reranking at once can't interleave.
+    write_json_atomic(RANKED_FILE, ranked)
     st.cache_data.clear()
     st.rerun()
+
+
+def _request_rerank(profile: dict) -> None:
+    """Rank on the worker when a database is configured; inline otherwise."""
+    if not db_configured():
+        _rerank_inline(profile)
+        return
+    from backend.database.corpus import CorpusUnavailable
+    from backend.services.ranking import request_ranking
+    from backend.taskqueue import ConcurrencyConflict
+    try:
+        task_id = request_ranking()
+    except ConcurrencyConflict:
+        notice = ("info", "A ranking run is already in progress.")
+    except CorpusUnavailable as exc:
+        notice = ("error", "The database has no job corpus yet. Import it with "
+                  "`python -m backend.database.corpus import`."
+                  if exc.reason == "empty" else
+                  f"The ranking queue's database is unavailable: {exc}")
+    except Exception as exc:                                # noqa: BLE001
+        notice = ("error", f"Couldn't queue the ranking run: {exc}")
+    else:
+        notice = ("success", f"Queued ranking task #{task_id}. The worker "
+                  "(`python -m backend.worker`) will pick it up.")
+    st.session_state["rank_notice"] = notice
+    st.rerun()                     # re-render the status panel above
+
+
+def _rank_status() -> dict | None:
+    from backend.services.ranking import ranking_status
+    try:
+        return ranking_status(RANKED_FILE.exists())
+    except Exception as exc:                                # noqa: BLE001
+        st.warning(f"Couldn't read the ranking queue: {exc}")
+        return None
+
+
+def _running_panel_body() -> None:
+    status = _rank_status()
+    if status is None or status["state"] != "running":
+        st.rerun()                 # finished: reload the page's rankings
+    st.info(f"⏳ Ranking in progress — {status['detail']}")
+
+
+if hasattr(st, "fragment"):        # Streamlit >= 1.37: poll on a timer
+    _running_panel = st.fragment(run_every=RANK_POLL_S)(_running_panel_body)
+else:                              # older Streamlit: manual refresh
+    def _running_panel() -> None:
+        _running_panel_body()
+        st.button("Refresh status", key="rank_refresh")
+
+
+def _queue_status_panel() -> None:
+    """Queue mode: the latest rank task's status; polls while it runs."""
+    notice = st.session_state.pop("rank_notice", None)
+    if notice:
+        getattr(st, notice[0])(notice[1])
+    status = _rank_status()
+    if status is None:
+        return
+    if status["state"] == "running":
+        st.session_state["rank_watching"] = True
+        _running_panel()
+    elif st.session_state.pop("rank_watching", False):
+        if status["state"] == "done":
+            st.success(f"Ranking finished: {status['ranked_count'] or 0:,} "
+                       "jobs ranked.")
+        elif status["state"] == "failed":
+            st.error(f"Ranking failed: {status['detail']}")
 
 
 def render(profile: dict) -> None:
@@ -60,11 +142,14 @@ def render(profile: dict) -> None:
         st.info("Your resume was re-analyzed. Rankings below may be from the "
                 "previous profile — re-rank to refresh.")
 
+    if db_configured():
+        _queue_status_panel()
+
     if not RANKED_FILE.exists():
         st.markdown('<p class="uja-muted">No job rankings yet.</p>',
                     unsafe_allow_html=True)
         if has_corpus and st.button("Rank jobs now", type="primary"):
-            _rerank_inline(profile)
+            _request_rerank(profile)
         if not has_corpus:
             st.error("No jobs.json found. Run the collector first: "
                      "`python -m backend.job_scraper.ats_collector`")
@@ -88,7 +173,7 @@ def render(profile: dict) -> None:
         top_n = st.number_input("Show top N", 10, len(ranked),
                                 min(30, len(ranked)), 10)
     if st.button("Re-rank against current resume"):
-        _rerank_inline(profile)
+        _request_rerank(profile)
 
     filtered = [r for r in ranked if r["match_score"] >= min_score]
     if company_filter:
