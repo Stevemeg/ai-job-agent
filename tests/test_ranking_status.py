@@ -47,3 +47,12 @@ def test_dead_is_failed_with_the_last_error():
     lease = status_from_task(_task("dead", attempts=3, last_error=(
         "lease expired (worker h:1:ab, attempt 3/3)")), False)
     assert lease["detail"] == "lease expired (worker h:1:ab, attempt 3/3)"
+
+
+def test_running_with_an_expired_lease_is_stalled():
+    s = status_from_task(_task("running", attempts=1, lease_expired=True), True)
+    assert s["state"] == "running" and s["ranked_count"] is None
+    assert "stalled — waiting for a worker to reclaim" in s["detail"]
+    assert "attempt 1/3" in s["detail"]
+    live = status_from_task(_task("running", attempts=1, lease_expired=False), True)
+    assert "stalled" not in live["detail"]

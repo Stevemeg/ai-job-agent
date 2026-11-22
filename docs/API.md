@@ -51,6 +51,7 @@ Ranking takes minutes, so it runs on the durable worker ([ADR-001 §2](adr/ADR-0
 | none yet, no ranked file | `idle` | — |
 | `queued` (not started) | `running` | "Task #N queued, waiting for a worker (attempt 0/3)." |
 | `running` | `running` | "Task #N running (attempt n/3)." |
+| `running`, lease expired (`lease_expires_at < now()`, database clock) | `running` | "Task #N stalled — waiting for a worker to reclaim (attempt n/3, lease expired)." Its worker died or hung; the next worker to poll takes it over (or marks it dead if that was its last attempt) |
 | `queued` after a failed attempt | `running` | "Task #N retrying: attempt n/3 failed (…error…)." Retries back off exponentially with jitter |
 | `succeeded` | `done` | `ranked_count` from the task result |
 | `dead` (attempts exhausted) | `failed` | the last error (`Type: message`) |

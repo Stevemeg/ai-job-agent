@@ -96,6 +96,10 @@ def status_from_task(task: dict | None, ranked_file_exists: bool) -> dict:
                        exists, else idle
       queued        -> running (waiting for a worker)
       running       -> running
+      running, lease expired
+                    -> running, "stalled -- waiting for a worker to
+                       reclaim" (its worker died or hung; the next claim
+                       takes it over, or marks it dead on its last attempt)
       queued again  -> running, "retrying" (an attempt failed)
       succeeded     -> done, ranked_count from the task result
       dead          -> failed, detail = the last error
@@ -113,6 +117,9 @@ def status_from_task(task: dict | None, ranked_file_exists: bool) -> dict:
     elif status == "queued":
         detail = (f"Task #{tid} retrying: attempt {n}/{m} failed "
                   f"({_error_summary(task.get('last_error'))}).")
+    elif status == "running" and task.get("lease_expired"):
+        detail = (f"Task #{tid} stalled — waiting for a worker to reclaim "
+                  f"(attempt {n}/{m}, lease expired).")
     elif status == "running":
         detail = f"Task #{tid} running (attempt {n}/{m})."
     elif status == "succeeded":

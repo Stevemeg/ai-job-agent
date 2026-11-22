@@ -160,3 +160,25 @@ def test_status_before_any_task_keeps_the_previous_run_behaviour(api):
     ranked_file.write_text("[]", encoding="utf-8")
     assert c.get("/v1/rankings/status").json() == {
         "state": "done", "detail": "loaded from previous run", "ranked_count": None}
+
+
+def test_status_reports_a_running_task_whose_lease_expired_as_stalled(api, pg):
+    """Its worker died mid-run: the task is still 'running' in the table,
+    but nothing is working on it until another worker reclaims it."""
+    c, _ = api
+    _seed()
+    assert c.post("/v1/rankings").status_code == 202
+    task = taskqueue.claim("dead-worker", [ranking.RANK_KIND], lease_s=30)
+    live = c.get("/v1/rankings/status").json()
+    assert live["state"] == "running" and "stalled" not in live["detail"]
+
+    with pg.begin() as conn:                       # the lease runs out
+        conn.execute(text("UPDATE tasks SET lease_expires_at = now() - "
+                          "interval '1 second' WHERE id = :i"), {"i": task.id})
+    stalled = c.get("/v1/rankings/status").json()
+    assert stalled["state"] == "running"
+    assert stalled["ranked_count"] is None
+    assert "stalled — waiting for a worker to reclaim" in stalled["detail"]
+
+    assert _worker().run_once().outcome == "succeeded"      # reclaimed
+    assert c.get("/v1/rankings/status").json()["state"] == "done"

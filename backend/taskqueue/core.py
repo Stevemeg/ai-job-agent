@@ -317,19 +317,28 @@ def fail(task_id: int, worker_id: str, error: str) -> bool:
 # --------------------------------------------------------------------------
 # reads
 # --------------------------------------------------------------------------
+# Every read adds lease_expired: running, but the lease ran out (the worker
+# died or hung) -- the next claim() will take it over. Computed with the
+# database clock, like every other lease decision.
+_READ = ("SELECT *, COALESCE(status = 'running' AND lease_expires_at < now(), "
+         "false) AS lease_expired FROM tasks")
+
+
 def get_task(task_id: int) -> dict | None:
+    """The tasks row as a dict, plus the computed `lease_expired`."""
     init_db()
     with get_engine().connect() as conn:
-        row = conn.execute(text("SELECT * FROM tasks WHERE id = :id"),
+        row = conn.execute(text(_READ + " WHERE id = :id"),
                            {"id": task_id}).mappings().first()
     return dict(row) if row is not None else None
 
 
 def latest_task(*, kind: str | None = None,
                 concurrency_key: str | None = None) -> dict | None:
-    """The most recently enqueued task matching the filters, or None. For a
-    concurrency_key this is the active task if there is one (a new task
-    can't be enqueued for the key while one is active)."""
+    """The most recently enqueued task matching the filters (with
+    `lease_expired`, as get_task), or None. For a concurrency_key this is
+    the active task if there is one (a new task can't be enqueued for the
+    key while one is active)."""
     init_db()
     where, params = [], {}
     if kind is not None:
@@ -338,7 +347,7 @@ def latest_task(*, kind: str | None = None,
     if concurrency_key is not None:
         where.append("concurrency_key = :ckey")
         params["ckey"] = concurrency_key
-    sql = ("SELECT * FROM tasks"
+    sql = (_READ
            + (" WHERE " + " AND ".join(where) if where else "")
            + " ORDER BY id DESC LIMIT 1")
     with get_engine().connect() as conn:
