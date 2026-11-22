@@ -25,9 +25,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 Base = declarative_base()
 
 
-import os
-
-
 def _build_db_url():
     """
     Build the SQLAlchemy database URL.
