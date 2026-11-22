@@ -61,7 +61,9 @@ def test_worker_rejects_an_empty_registry_and_bad_timings():
 
 
 def test_default_registry_is_keyed_by_task_kind():
-    assert Worker().kinds == [ranking.RANK_KIND]
+    from backend.services import scan
+    assert Worker().kinds == sorted([ranking.RANK_KIND, scan.SCAN_KIND])
+    assert Worker().handlers[scan.SCAN_KIND] is scan.run_scan_task
 
 
 # ---- the "rank" handler (no DB; the DB-backed tests are in test_rank_lock_db.py) --

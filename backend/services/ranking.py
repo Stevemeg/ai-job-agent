@@ -132,6 +132,11 @@ def _load_profile() -> dict:
         return json.load(f)
 
 
+def load_profile_if_present() -> dict | None:
+    """The candidate profile, or None before any resume was uploaded."""
+    return _load_profile() if PROFILE_FILE.exists() else None
+
+
 def corpus_version_str(version: tuple) -> str:
     """CorpusSnapshot.version as a JSON-safe string, e.g.
     "db:3875:2026-11-22T10:00:00+00:00"."""

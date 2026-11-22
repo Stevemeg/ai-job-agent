@@ -1,7 +1,7 @@
 """
 backend.worker -- the durable worker (ADR-001 §2).
 
-    python -m backend.worker [--kinds rank] [--lease 60] [--grace 30]
+    python -m backend.worker [--kinds rank,scan] [--lease 60] [--grace 30]
 
 Claims tasks from the Postgres queue (backend.taskqueue) and runs the
 handler registered for each task's kind:
@@ -87,7 +87,8 @@ def make_worker_id() -> str:
 
 def default_handlers() -> dict[str, Handler]:
     from ..services.ranking import RANK_KIND, run_rank_task
-    return {RANK_KIND: run_rank_task}
+    from ..services.scan import SCAN_KIND, run_scan_task
+    return {RANK_KIND: run_rank_task, SCAN_KIND: run_scan_task}
 
 
 def _format_error(exc: BaseException) -> str:
