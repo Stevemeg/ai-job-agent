@@ -1,6 +1,8 @@
-# Full stack: PostgreSQL + FastAPI + Streamlit.
+# Full stack: PostgreSQL + FastAPI + Streamlit + the task worker.
 #
 #   docker compose up --build
+#   # first run only: seed the DB corpus the worker ranks against
+#   docker compose exec api python -m backend.database.corpus import data/sample_jobs.json
 #
 #   UI:   http://localhost:8501
 #   API:  http://localhost:8000/docs
@@ -9,6 +11,9 @@
 # ./data and ./uploads are bind-mounted, so profiles, corpora, and rankings
 # are shared between containers AND with host-side CLI runs (resume tailoring
 # via Ollama still runs on the host -- it needs the Ollama daemon).
+#
+# Rankings run on the worker: the API and UI only enqueue "rank" tasks in
+# Postgres, and the worker is the single writer of data/ranked_jobs.json.
 #
 # The old backend/database/docker-compose.yml still works standalone for
 # DB-only local development; this file is the one-command full stack.
@@ -55,6 +60,30 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+
+  # Durable task worker (ADR-001 §2): claims queued tasks from Postgres with
+  # SKIP LOCKED, heartbeats its lease, and retries failures with backoff.
+  # Same image as api/ui. It refuses to start without a reachable DB.
+  # `docker compose stop` sends SIGTERM: the worker stops claiming and lets
+  # the current task finish within --grace. stop_grace_period must be longer
+  # than that, or Docker SIGKILLs it first (the task is then retried by the
+  # next worker once its lease expires).
+  worker:
+    build: .
+    restart: unless-stopped
+    command: python -m backend.worker --grace 30
+    environment:
+      DB_HOST: db
+      DB_USER: ${DB_USER:-ai_job_agent}
+      DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
+      DB_NAME: ${DB_NAME:-ai_job_agent}
+    volumes:
+      - ./data:/app/data          # profile in, ranked_jobs.json out
+      - models:/models            # embedding model cache, shared with api/ui
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_grace_period: 45s
 
   ui:
     build: .
