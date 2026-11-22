@@ -8,6 +8,32 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+
+    # Throwaway Postgres for the `db`-marked tests. Each test also isolates
+    # itself in its own schema (tests/conftest.py), so tests never share state.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ai_job_agent
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: ai_job_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_job_agent -d ai_job_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # The variable names backend/database/db.py already reads.
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: ai_job_agent
+      DB_PASSWORD: ci_only_password
+      DB_NAME: ai_job_agent
+
     steps:
       - uses: actions/checkout@v4
 
@@ -27,11 +53,24 @@ jobs:
       - name: Validator smoke test (no heavy deps needed)
         run: python -m backend.resume_engine.validate_tailored
 
-      - name: Unit tests
+      - name: Install test deps
         # Deliberately light install: analysis/validator/taxonomy tests are
-        # pure-stdlib; tracker tests need sqlalchemy only (importorskip guards
-        # anything heavier). Full requirements.txt (torch etc.) is not needed
-        # to validate the domain logic.
+        # pure-stdlib; tracker/corpus tests need sqlalchemy + psycopg2; the
+        # collector tests need requests + bs4 (importorskip guards anything
+        # heavier). Full requirements.txt (torch etc.) is not needed to
+        # validate the domain logic.
+        run: pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4
+
+      - name: Unit tests
+        run: pytest -q -rs -m "not db"
+
+      - name: DB tests (postgres service)
+        # Must RUN here, never skip: conftest fails db tests under CI when no
+        # DB is configured, and this step fails if any were skipped anyway.
+        shell: bash
         run: |
-          pip install sqlalchemy fastapi httpx python-multipart
-          pytest tests/ -q
+          pytest -q -rs -m db | tee db-tests.log
+          if grep -q "SKIPPED" db-tests.log; then
+            echo "::error::db-marked tests were skipped in CI"
+            exit 1
+          fi
