@@ -1,6 +1,8 @@
 """Migrations must upgrade a database created by an OLDER schema.sql in
 place, idempotently, without losing rows. Each test runs in a throwaway
 schema (see the ``pg`` fixture in conftest.py)."""
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("sqlalchemy")
@@ -83,7 +85,7 @@ def test_old_constraint_upgraded_idempotently(pg, monkeypatch):
     assert checks == [db.EVENT_TYPE_CHECK_NAME]
 
 
-def test_old_events_gain_note_column(pg, monkeypatch):
+def test_old_database_gains_note_column_and_tasks_table(pg, monkeypatch):
     with pg.begin() as conn:
         conn.exec_driver_sql(OLD_SCHEMA)
     _run_init_twice(monkeypatch)
@@ -92,7 +94,75 @@ def test_old_events_gain_note_column(pg, monkeypatch):
             "SELECT count(*) FROM information_schema.columns "
             "WHERE table_schema = current_schema() "
             "AND table_name = 'events' AND column_name = 'note'")).scalar()
+        tasks_exists = conn.execute(text(
+            "SELECT to_regclass('tasks') IS NOT NULL")).scalar()
     assert note_col == 1
+    assert tasks_exists
+
+
+SCHEMA_SQL = Path(__file__).resolve().parents[1] / "backend" / "database" / "schema.sql"
+
+_COLUMNS_SQL = """
+SELECT table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+ORDER BY table_name, column_name
+"""
+_INDEXES_SQL = """
+SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()
+ORDER BY indexname
+"""
+
+# Known v1 drift that pre-dates v2 and is harmless in Postgres: the v1 models
+# use String (VARCHAR without length == TEXT) where schema.sql says TEXT, and
+# leave their server-defaulted timestamps nullable where schema.sql says NOT
+# NULL. Tolerated here so the test guards everything v2 adds; anything else
+# (a missing column, a v2 type or nullability mismatch) still fails.
+_V1_DEFAULTED_TIMESTAMPS = {("users", "created_at"), ("events", "created_at"),
+                            ("canonical_jobs", "first_seen_at"),
+                            ("canonical_jobs", "last_seen_at")}
+
+
+def _normalized(rows):
+    out = []
+    for table, column, dtype, nullable in rows:
+        if dtype == "character varying":
+            dtype = "text"
+        if (table, column) in _V1_DEFAULTED_TIMESTAMPS:
+            nullable = "v1-drift"
+        out.append((table, column, dtype, nullable))
+    return out
+
+
+def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
+    """db.py says its models 'mirror schema.sql exactly'; this enforces it.
+    A fresh Docker volume is built from schema.sql, everything else from
+    create_all() -- the two must produce the same tables."""
+    with pg.begin() as conn:
+        conn.exec_driver_sql(SCHEMA_SQL.read_text(encoding="utf-8"))
+    with pg.connect() as conn:
+        from_sql = conn.execute(text(_COLUMNS_SQL)).all()
+        idx_from_sql = conn.execute(text(_INDEXES_SQL)).scalars().all()
+
+    # schema.sql-built databases must also survive migrations untouched
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        assert conn.execute(text(_COLUMNS_SQL)).all() == from_sql
+
+    with pg.begin() as conn:
+        conn.execute(text("DROP TABLE events, canonical_jobs, users, tasks"))
+    monkeypatch.setattr(db, "_initialized", False)
+    db.init_db()
+    with pg.connect() as conn:
+        from_orm = conn.execute(text(_COLUMNS_SQL)).all()
+        idx_from_orm = conn.execute(text(_INDEXES_SQL)).scalars().all()
+
+    assert _normalized(from_orm) == _normalized(from_sql)
+    # ORM-only extras would be fine, but every schema.sql index must exist
+    # on ORM-built databases too (constraint-backing indexes share names).
+    assert set(idx_from_sql) - set(idx_from_orm) <= {
+        "idx_canonical_jobs_company_title", "idx_events_user_id",
+        "idx_events_job_id", "idx_events_event_type"}
 
 
 def test_fresh_database_init_is_idempotent(pg, monkeypatch):

@@ -1,6 +1,6 @@
 """
 db.py — Postgres connection layer + ORM models for users, canonical_jobs,
-and events.
+events, and tasks.
 
 Connection string is read from environment variables (see .env.example).
 Never hardcode credentials here -- this file is committed to your repo.
@@ -15,8 +15,9 @@ import os
 from contextlib import contextmanager
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, ForeignKey,
-    TIMESTAMP, Numeric, ARRAY, CheckConstraint, UniqueConstraint, func
+    create_engine, Column, Integer, BigInteger, String, Text, ForeignKey,
+    TIMESTAMP, Numeric, ARRAY, CheckConstraint, UniqueConstraint, Index,
+    func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -164,6 +165,41 @@ class Event(Base):
     job = relationship("CanonicalJob", back_populates="events")
 
 
+TASK_STATUSES = ("queued", "running", "succeeded", "failed", "dead")
+
+
+class Task(Base):
+    """Durable work queue row (ADR-001 §2). Schema only in Phase 1 -- the
+    worker that claims rows (SELECT ... FOR UPDATE SKIP LOCKED) is Phase 2.
+
+    updated_at is refreshed by the ORM on ORM updates; raw-SQL writers (the
+    future claim/heartbeat queries) must set it explicitly."""
+    __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (%s)" % ",".join(f"'{s}'" for s in TASK_STATUSES),
+            name="tasks_status_check"),
+        Index("idx_tasks_status_run_after", "status", "run_after"),
+    )
+
+    id = Column(BigInteger, primary_key=True)            # BIGSERIAL
+    kind = Column(Text, nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    status = Column(Text, nullable=False, server_default=text("'queued'"))
+    idempotency_key = Column(Text, unique=True)          # NULLs never collide
+    attempts = Column(Integer, nullable=False, server_default=text("0"))
+    max_attempts = Column(Integer, nullable=False, server_default=text("3"))
+    run_after = Column(TIMESTAMP(timezone=True), nullable=False,
+                       server_default=func.now())
+    lease_expires_at = Column(TIMESTAMP(timezone=True))
+    locked_by = Column(Text)
+    last_error = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now(), onupdate=func.now())
+
+
 _initialized = False
 
 
@@ -184,8 +220,8 @@ def _run_migrations():
     """Idempotent, additive migrations for columns added after the original
     schema.sql shipped. create_all() does NOT alter existing tables, so
     databases created before a column existed need these. Each statement is
-    IF NOT EXISTS -- safe to run on every startup."""
-    from sqlalchemy import text
+    IF NOT EXISTS -- safe to run on every startup. (Whole new tables, like
+    tasks, need nothing here: create_all() creates missing tables.)"""
     with get_engine().begin() as conn:
         conn.execute(text(
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS note TEXT"))
