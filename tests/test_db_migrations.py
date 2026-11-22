@@ -118,12 +118,20 @@ _INDEXES_SQL = """
 SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()
 ORDER BY indexname
 """
-# Full definitions (incl. the partial-index WHERE) for the v2 tasks table,
-# which must match exactly between schema.sql and the ORM.
+# Full definitions (incl. the partial-index WHERE) for the v2 tables, which
+# must match exactly between schema.sql and the ORM.
 _TASK_INDEXDEFS_SQL = """
 SELECT indexname, indexdef FROM pg_indexes
-WHERE schemaname = current_schema() AND tablename = 'tasks'
+WHERE schemaname = current_schema() AND tablename IN ('tasks', 'job_scores')
 ORDER BY indexname
+"""
+# ...and their constraints (PK, FK with its ON DELETE, CHECKs).
+_V2_CONSTRAINTS_SQL = """
+SELECT c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)
+FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+WHERE t.relnamespace = current_schema()::regnamespace
+  AND t.relname IN ('tasks', 'job_scores')
+ORDER BY 1, 2
 """
 
 # Known v1 drift that pre-dates v2 and is harmless in Postgres: the v1 models
@@ -157,6 +165,7 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
         from_sql = conn.execute(text(_COLUMNS_SQL)).all()
         idx_from_sql = conn.execute(text(_INDEXES_SQL)).scalars().all()
         task_idx_from_sql = conn.execute(text(_TASK_INDEXDEFS_SQL)).all()
+        v2_cons_from_sql = conn.execute(text(_V2_CONSTRAINTS_SQL)).all()
 
     # schema.sql-built databases must also survive migrations untouched
     _run_init_twice(monkeypatch)
@@ -164,13 +173,15 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
         assert conn.execute(text(_COLUMNS_SQL)).all() == from_sql
 
     with pg.begin() as conn:
-        conn.execute(text("DROP TABLE events, canonical_jobs, users, tasks"))
+        conn.execute(text(
+            "DROP TABLE job_scores, events, canonical_jobs, users, tasks"))
     monkeypatch.setattr(db, "_initialized", False)
     db.init_db()
     with pg.connect() as conn:
         from_orm = conn.execute(text(_COLUMNS_SQL)).all()
         idx_from_orm = conn.execute(text(_INDEXES_SQL)).scalars().all()
         task_idx_from_orm = conn.execute(text(_TASK_INDEXDEFS_SQL)).all()
+        v2_cons_from_orm = conn.execute(text(_V2_CONSTRAINTS_SQL)).all()
 
     assert _normalized(from_orm) == _normalized(from_sql)
     # ORM-only extras would be fine, but every schema.sql index must exist
@@ -180,6 +191,10 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
         "idx_events_job_id", "idx_events_event_type"}
     assert task_idx_from_orm == task_idx_from_sql
     assert db.TASK_CONCURRENCY_INDEX in dict(task_idx_from_sql)
+    assert db.JOB_SCORES_LOOKUP_INDEX in dict(task_idx_from_sql)
+    assert v2_cons_from_orm == v2_cons_from_sql
+    assert ("job_scores", "job_scores_pkey",
+            "PRIMARY KEY (job_id, profile_hash, formula_version)") in v2_cons_from_sql
 
 
 # The tasks table exactly as Phase 1 shipped it (before the queue columns).
@@ -298,3 +313,49 @@ def test_fresh_database_init_is_idempotent(pg, monkeypatch):
         _insert_event(pg, agent_type)
     with pytest.raises(IntegrityError):
         _insert_event(pg, "ghosted")
+
+
+# A database exactly as Phase 2 left it: today's schema.sql minus job_scores.
+PHASE2_SCHEMA = SCHEMA_SQL.read_text(encoding="utf-8").split(
+    "-- v2 incremental ranking (Phase 3)")[0]
+
+
+def test_phase2_database_gains_job_scores_idempotently(pg, monkeypatch):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(PHASE2_SCHEMA)
+        conn.execute(text(
+            "INSERT INTO canonical_jobs (company, title, normalized_title, "
+            "content_hash) VALUES ('acme', 'AI Engineer', 'ai engineer', 'h')"))
+        assert conn.execute(text(
+            "SELECT to_regclass('job_scores') IS NULL")).scalar()
+    _run_init_twice(monkeypatch)
+
+    def score(passed=True, profile="p1", **cols):
+        values = {"match_score": 71.5, "score_breakdown": '{"semantic": 0.5}',
+                  "explanation": '{"strong_matches": []}', **cols}
+        with pg.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO job_scores (job_id, profile_hash, formula_version, "
+                "content_hash, passed, match_score, score_breakdown, explanation) "
+                "VALUES (1, :p, '1', 'c', :passed, :match_score, "
+                "CAST(:score_breakdown AS jsonb), CAST(:explanation AS jsonb))"),
+                {"p": profile, "passed": passed, **values})
+
+    score()
+    score(profile="p2", passed=False, match_score=None, score_breakdown=None,
+          explanation=None)                                 # gate failure row
+    with pytest.raises(IntegrityError):
+        score()                                             # primary key
+    with pytest.raises(IntegrityError):                     # passed needs a score
+        score(profile="p3", match_score=None)
+    with pg.connect() as conn:
+        indexdef = conn.execute(text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = :n"), {"n": db.JOB_SCORES_LOOKUP_INDEX}).scalar()
+        assert conn.execute(text("SELECT count(*) FROM job_scores")).scalar() == 2
+    assert indexdef and "(profile_hash, formula_version)" in indexdef
+
+    with pg.begin() as conn:                                # FK cascades
+        conn.execute(text("DELETE FROM canonical_jobs"))
+    with pg.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM job_scores")).scalar() == 0

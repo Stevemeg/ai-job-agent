@@ -1,6 +1,6 @@
 """
 db.py — Postgres connection layer + ORM models for users, canonical_jobs,
-events, and tasks.
+events, tasks, and job_scores.
 
 Connection string is read from environment variables (see .env.example).
 Never hardcode credentials here -- this file is committed to your repo.
@@ -16,9 +16,9 @@ import re
 from contextlib import contextmanager
 
 from sqlalchemy import (
-    create_engine, Column, Integer, BigInteger, String, Text, ForeignKey,
-    TIMESTAMP, Numeric, ARRAY, CheckConstraint, UniqueConstraint, Index,
-    func, text,
+    create_engine, Column, Integer, BigInteger, Boolean, String, Text,
+    ForeignKey, TIMESTAMP, Numeric, ARRAY, CheckConstraint, UniqueConstraint,
+    Index, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -224,6 +224,44 @@ class Task(Base):
                         server_default=func.now(), onupdate=func.now())
 
 
+JOB_SCORES_LOOKUP_INDEX = "idx_job_scores_profile_formula"
+
+
+class JobScore(Base):
+    """One job's cached matcher output for one profile under one scoring
+    formula (Phase 3 incremental ranking; written by services/scoring.py
+    while the rank lock is held).
+
+    A job needs (re)scoring iff there is no row for (job_id, profile_hash,
+    formula_version) whose content_hash is the job's current one. Gate
+    failures are rows too (passed = false, no score), so they are not
+    re-evaluated either. content_hash is scoring.score_input_hash(): it
+    covers every job field the matcher reads, including the tags and
+    seniority that canonical_jobs.content_hash leaves out."""
+    __tablename__ = "job_scores"
+    __table_args__ = (
+        # A passing row always carries its score (assembly relies on it).
+        CheckConstraint(
+            "NOT passed OR (match_score IS NOT NULL AND score_breakdown IS "
+            "NOT NULL AND explanation IS NOT NULL)",
+            name="job_scores_passed_has_score_check"),
+        # Every rank execution reads all rows of one (profile, formula).
+        Index(JOB_SCORES_LOOKUP_INDEX, "profile_hash", "formula_version"),
+    )
+
+    job_id = Column(Integer, ForeignKey("canonical_jobs.id", ondelete="CASCADE"),
+                    primary_key=True)
+    profile_hash = Column(Text, primary_key=True)      # sha256, canonical JSON
+    formula_version = Column(Text, primary_key=True)   # version.FORMULA_VERSION
+    content_hash = Column(Text, nullable=False)
+    passed = Column(Boolean, nullable=False)           # the hard gates
+    match_score = Column(Numeric)                      # NULL when gated out
+    score_breakdown = Column(JSONB)                    # {skill_overlap, semantic, role, seniority}
+    explanation = Column(JSONB)                        # {strong_matches, likely_matches, missing_skills}
+    scored_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                       server_default=func.now())
+
+
 _initialized = False
 
 # pg_advisory_xact_lock key serializing schema setup across processes (API,
@@ -281,7 +319,9 @@ def _run_migrations(conn=None):
     schema.sql shipped. create_all() does NOT alter existing tables, so
     databases created before a column existed need these. Each statement is
     IF NOT EXISTS (or checks first) -- safe to run on every startup. (Whole
-    new tables need nothing here: create_all() creates missing tables.)
+    new tables need nothing here: create_all() creates missing tables, with
+    their indexes and constraints -- that is how existing databases get
+    tasks (Phase 1) and job_scores (Phase 3).)
 
     Runs under the migration advisory lock, in the caller's transaction if
     one is passed (init_db does), else in its own."""
