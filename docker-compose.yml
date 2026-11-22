@@ -1,4 +1,4 @@
-# Full stack: PostgreSQL + FastAPI + Streamlit + the task worker.
+# Full stack: PostgreSQL + FastAPI + Streamlit + the task worker + the scan scheduler.
 #
 #   docker compose up --build
 #   # first run only: seed the DB corpus the worker ranks against
@@ -14,6 +14,8 @@
 #
 # Rankings run on the worker: the API and UI only enqueue "rank" tasks in
 # Postgres, and the worker is the single writer of data/ranked_jobs.json.
+# The scheduler enqueues a "scan" (collect -> upsert -> incremental rank)
+# every SCAN_CRON (default 09:00 IST); the worker runs that too.
 #
 # The old backend/database/docker-compose.yml still works standalone for
 # DB-only local development; this file is the one-command full stack.
@@ -84,6 +86,28 @@ services:
       db:
         condition: service_healthy
     stop_grace_period: 45s
+
+  # Scan scheduler (ADR-001 §3): APScheduler with its job store in Postgres,
+  # timezone Asia/Kolkata. It only ENQUEUES "scan" tasks (one per scheduled
+  # slot -- the idempotency key is the slot's fire time); the worker runs
+  # them. Leader election by a Postgres advisory lock: a second copy waits
+  # in standby, and a leader that loses its lock connection exits non-zero
+  # so `restart` brings it back -- there are never two leaders. Same image;
+  # it needs no volumes (no files, no model).
+  scheduler:
+    build: .
+    restart: unless-stopped
+    command: python -m backend.scheduler
+    environment:
+      DB_HOST: db
+      DB_USER: ${DB_USER:-ai_job_agent}
+      DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
+      DB_NAME: ${DB_NAME:-ai_job_agent}
+      SCAN_CRON: ${SCAN_CRON:-0 9 * * *}              # 09:00 IST daily
+      SCAN_MISFIRE_GRACE_S: ${SCAN_MISFIRE_GRACE_S:-3600}
+    depends_on:
+      db:
+        condition: service_healthy
 
   ui:
     build: .
