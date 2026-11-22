@@ -124,3 +124,25 @@ def latest_scan_task() -> dict | None:
     from .. import taskqueue
     return taskqueue.latest_task(kind=SCAN_KIND,
                                  concurrency_key=SCAN_CONCURRENCY_KEY)
+
+
+def scan_status(task: dict | None) -> dict:
+    """The ScanStatus payload for a scan task (None: no scan yet): state
+    and detail as for rankings (task_status.describe), who triggered it,
+    and -- once done -- the scan's stats."""
+    from .task_status import describe
+    if task is None:
+        return {"state": "idle", "detail": "No scan has run yet.",
+                "task_id": None, "trigger": None, "scheduled_for": None,
+                "attempts": 0, "max_attempts": None, "created_at": None,
+                "started_at": None, "finished_at": None, "result": None}
+    state, detail = describe(task)
+    payload = task.get("payload") or {}
+    return {"state": state, "detail": detail, "task_id": task["id"],
+            "trigger": payload.get("trigger"),
+            "scheduled_for": payload.get("scheduled_for"),
+            "attempts": task["attempts"], "max_attempts": task["max_attempts"],
+            "created_at": task.get("created_at"),
+            "started_at": task.get("started_at"),
+            "finished_at": task.get("finished_at"),
+            "result": task.get("result") if state == "done" else None}

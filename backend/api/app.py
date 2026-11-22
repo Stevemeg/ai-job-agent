@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from ..version import __version__, FORMULA_VERSION
-from .routers import analysis, profile, rankings, tracker
+from .routers import analysis, profile, rankings, scans, tracker
 
 app = FastAPI(
     title="Universal AI Job Agent API",
@@ -28,6 +28,7 @@ app = FastAPI(
 app.include_router(profile.router, prefix="/v1")
 app.include_router(analysis.router, prefix="/v1")
 app.include_router(rankings.router, prefix="/v1")
+app.include_router(scans.router, prefix="/v1")
 app.include_router(tracker.router, prefix="/v1")
 
 

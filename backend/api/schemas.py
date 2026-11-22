@@ -2,6 +2,7 @@
 dict shapes so engines can evolve without breaking clients."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -100,6 +101,44 @@ class RankedJob(BaseModel):
     likely_matches: list[Any] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
     apply_link: Optional[str] = None
+
+
+# ---- scans --------------------------------------------------------------------
+
+class ScanSourceFailure(BaseModel):
+    source: str                    # greenhouse | lever | ashby
+    slug: str
+    error: str
+
+
+class ScanResult(BaseModel):
+    inserted: int                  # new canonical jobs
+    updated: int                   # existing jobs sighted again
+    changed: int                   # ...whose content changed
+    scored: int                    # jobs (re)scored by this scan's rank
+    skipped_unchanged: int         # jobs whose stored score was current
+    sources_ok: int
+    sources_failed: list[ScanSourceFailure] = Field(default_factory=list)
+    duration_s: float
+    corpus_version: Optional[str] = None
+    profile_hash: Optional[str] = None      # None: no profile, rank skipped
+    formula_version: str
+    ranked_count: Optional[int] = None
+    rank_skipped: Optional[str] = None
+
+
+class ScanStatus(BaseModel):
+    state: str                     # idle | running | done | failed
+    detail: str = ""
+    task_id: Optional[int] = None
+    trigger: Optional[str] = None  # schedule | api
+    scheduled_for: Optional[str] = None     # the slot, for scheduled scans
+    attempts: int = 0
+    max_attempts: Optional[int] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    result: Optional[ScanResult] = None     # set once state is done
 
 
 # ---- tracker -----------------------------------------------------------------

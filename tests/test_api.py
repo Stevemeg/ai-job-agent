@@ -144,3 +144,28 @@ def test_ranking_status_without_a_db_or_previous_run_is_idle(client):
     c, _ = client
     assert c.get("/v1/rankings/status").json() == {
         "state": "idle", "detail": "", "ranked_count": None}
+
+
+# ---- /v1/scans without a (reachable) database ---------------------------------------
+
+def test_scans_need_a_database(client):
+    c, _ = client
+    for method, path in (("post", "/v1/scans"), ("get", "/v1/scans/latest")):
+        r = getattr(c, method)(path)
+        assert r.status_code == 503
+        assert "DATABASE_URL" in r.json()["detail"]
+
+
+def test_scan_post_with_an_unreachable_database_is_503(client, monkeypatch):
+    pytest.importorskip("psycopg2")
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    monkeypatch.setenv("DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("DB_PORT", str(closed))
+    monkeypatch.setenv("DB_CONNECT_TIMEOUT", "1")
+    c, _ = client
+    r = c.post("/v1/scans")
+    assert r.status_code == 503
+    assert "Database unavailable" in r.json()["detail"]
