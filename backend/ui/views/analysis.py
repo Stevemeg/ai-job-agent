@@ -199,9 +199,11 @@ def render_careers(careers: list[dict]) -> None:
 # ---- caching wrappers -------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-def cached_analysis(profile: dict, jobs_mtime: float,
+def cached_analysis(profile: dict, corpus_version: tuple,
                     _jobs: list[dict]) -> dict:
-    """All analysis in one cached call, keyed on profile + jobs file mtime.
+    """All analysis in one cached call, keyed on profile + corpus version
+    (CorpusSnapshot.version: file mtime for JSON, row count + last sighting
+    for Postgres) -- the corpus itself is underscore-excluded from hashing.
 
     Careers are computed FIRST so skill gaps can be weighted by the
     candidate's actual target roles.

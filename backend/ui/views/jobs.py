@@ -12,19 +12,9 @@ import json
 
 import streamlit as st
 
-from backend.config import RANKED_FILE, JOBS_FILE, SAMPLE_JOBS_FILE
+from backend.config import RANKED_FILE
+from backend.database.corpus import load_corpus, load_corpus_snapshot
 from .. import theme
-
-
-def _active_jobs_file():
-    """Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only.
-    Deployed instances that never ran the collector fall back to the small
-    committed sample corpus so the Jobs tab still works out of the box."""
-    if JOBS_FILE.exists():
-        return JOBS_FILE
-    if SAMPLE_JOBS_FILE.exists():
-        return SAMPLE_JOBS_FILE
-    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -34,21 +24,20 @@ def _load_ranked(mtime: float) -> list[dict]:
 
 
 @st.cache_data(show_spinner=False)
-def _load_descriptions(path_str: str, mtime: float) -> dict:
-    with open(path_str, "r", encoding="utf-8") as f:
-        jobs = json.load(f)
+def _load_descriptions(corpus_version: tuple, _jobs: list[dict]) -> dict:
+    # Keyed on the corpus version (file mtime, or DB row count + last
+    # sighting); the corpus itself is underscore-excluded from hashing.
     out = {}
-    for j in jobs:
+    for j in _jobs:
         key = ((j.get("company") or "").lower().strip(),
                " ".join((j.get("title") or "").lower().split()))
         out.setdefault(key, j.get("clean_description", ""))
     return out
 
 
-def _rerank_inline(profile: dict, jobs_file) -> None:
+def _rerank_inline(profile: dict) -> None:
     from backend.matching_engine.matcher import rank_jobs
-    with open(jobs_file, "r", encoding="utf-8") as f:
-        jobs = json.load(f)
+    jobs = load_corpus()
     with st.spinner(f"Ranking {len(jobs):,} jobs against your profile — "
                     "this takes a few minutes (embedding model)..."):
         ranked = rank_jobs(profile, jobs, candidate_is_fresher=True)
@@ -59,8 +48,9 @@ def _rerank_inline(profile: dict, jobs_file) -> None:
 
 
 def render(profile: dict) -> None:
-    jobs_file = _active_jobs_file()
-    if jobs_file == SAMPLE_JOBS_FILE:
+    corpus = load_corpus_snapshot()      # DB -> jobs.json -> sample (cached)
+    has_corpus = corpus.source != "none"
+    if corpus.source == "sample":
         st.info("Running on the sample corpus (120 jobs) — this deployment "
                 "doesn't have the full scraped dataset. Run "
                 "`python -m backend.job_scraper.ats_collector` locally for "
@@ -73,16 +63,16 @@ def render(profile: dict) -> None:
     if not RANKED_FILE.exists():
         st.markdown('<p class="uja-muted">No job rankings yet.</p>',
                     unsafe_allow_html=True)
-        if jobs_file and st.button("Rank jobs now", type="primary"):
-            _rerank_inline(profile, jobs_file)
-        if not jobs_file:
+        if has_corpus and st.button("Rank jobs now", type="primary"):
+            _rerank_inline(profile)
+        if not has_corpus:
             st.error("No jobs.json found. Run the collector first: "
                      "`python -m backend.job_scraper.ats_collector`")
         return
 
     ranked = _load_ranked(RANKED_FILE.stat().st_mtime)
-    descriptions = (_load_descriptions(str(jobs_file), jobs_file.stat().st_mtime)
-                    if jobs_file else {})
+    descriptions = (_load_descriptions(corpus.version, corpus.jobs)
+                    if has_corpus else {})
 
     # Filters
     f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
@@ -98,7 +88,7 @@ def render(profile: dict) -> None:
         top_n = st.number_input("Show top N", 10, len(ranked),
                                 min(30, len(ranked)), 10)
     if st.button("Re-rank against current resume"):
-        _rerank_inline(profile, jobs_file)
+        _rerank_inline(profile)
 
     filtered = [r for r in ranked if r["match_score"] >= min_score]
     if company_filter:

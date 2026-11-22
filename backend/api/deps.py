@@ -15,25 +15,15 @@ def load_profile() -> dict:
         return json.load(f)
 
 
-# Parsing the ~3,875-job corpus per request is wasteful; cache on (path,
-# mtime) so a corpus refresh invalidates automatically (audit fix). Path is
-# read at call time so tests can monkeypatch JOBS_FILE on this module.
-_jobs_cache: dict = {"key": None, "jobs": []}
-
-
 def load_jobs() -> list[dict]:
-    # Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only. Cloud
-    # deployments that never ran the collector fall back to the small
-    # committed sample corpus so ranking/browsing still works out of the box.
-    active = JOBS_FILE if JOBS_FILE.exists() else SAMPLE_JOBS_FILE
-    if not active.exists():
-        return []
-    key = (str(active), active.stat().st_mtime)
-    if _jobs_cache["key"] != key:
-        with open(active, "r", encoding="utf-8") as f:
-            _jobs_cache["jobs"] = json.load(f)
-        _jobs_cache["key"] = key
-    return _jobs_cache["jobs"]
+    """The job corpus via the single corpus loader: Postgres when configured
+    and reachable, else JOBS_FILE (gitignored, local/self-hosted), else the
+    committed SAMPLE_JOBS_FILE so cloud deployments that never ran the
+    collector still rank/browse out of the box. The JSON path stays cached
+    on (path, mtime). Paths are read at call time so tests can monkeypatch
+    them on this module."""
+    from ..database.corpus import load_corpus
+    return load_corpus(jobs_file=JOBS_FILE, sample_file=SAMPLE_JOBS_FILE)
 
 
 def load_ranked() -> list[dict]:
