@@ -1,6 +1,6 @@
 """
 main.py -- end-to-end CLI pipeline: parse resume -> load corpus -> filter ->
-rank -> save.
+rank -> save (ranked_jobs.json via services.ranking, its single writer).
 
 Run from project root:
     python -m backend.main          (or: python backend/main.py)
@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.config import DATA_DIR, UPLOADS_DIR, PROFILE_FILE, RANKED_FILE  # noqa: E402
+from backend.config import DATA_DIR, UPLOADS_DIR, PROFILE_FILE  # noqa: E402
 
 from backend.resume_parser.resume_parser import (  # noqa: E402
     extract_text_from_pdf,
@@ -48,8 +48,8 @@ from backend.database.corpus import (  # noqa: E402
     load_corpus
 )
 
-from backend.matching_engine.matcher import (  # noqa: E402
-    rank_jobs
+from backend.services.ranking import (  # noqa: E402
+    rank_and_publish
 )
 
 from backend.matching_engine.domain_filter import (  # noqa: E402
@@ -170,30 +170,15 @@ def run_pipeline():
         filtered_jobs = jobs
 
     # -----------------------------------
-    # JOB MATCHING
+    # JOB MATCHING + SAVE RANKED JOBS
     # -----------------------------------
+    # Through the ranking service, the single writer of ranked_jobs.json.
     print("Matching Jobs...\n")
 
-    ranked_jobs = rank_jobs(
+    ranked_jobs = rank_and_publish(
         candidate_profile,
         filtered_jobs
     )
-
-    # -----------------------------------
-    # SAVE RANKED JOBS
-    # -----------------------------------
-    with open(
-        RANKED_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            ranked_jobs,
-            file,
-            indent=4,
-            ensure_ascii=False
-        )
 
     print("Ranked Jobs Saved.\n")
 

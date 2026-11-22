@@ -45,8 +45,10 @@ def page(tmp_path, monkeypatch, profile, jobs_view):
                                       "clean_description": "LLMs"}]),
                          encoding="utf-8")
     ranked_file = tmp_path / "ranked_jobs.json"
+    import backend.services.ranking as ranking
     monkeypatch.setattr(config, "PROFILE_FILE", profile_file)
-    monkeypatch.setattr(jobs_view, "RANKED_FILE", ranked_file)
+    monkeypatch.setattr(jobs_view, "RANKED_FILE", ranked_file)    # reads
+    monkeypatch.setattr(ranking, "RANKED_FILE", ranked_file)      # the writer
     monkeypatch.setattr(corpus, "JOBS_FILE", jobs_file)
     return ranked_file
 

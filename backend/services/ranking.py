@@ -2,9 +2,11 @@
 ranking.py -- ranking as a queued task (ADR-001 §2).
 
 The one ranking service shared by the API (POST /v1/rankings), the Streamlit
-UI and the worker, so data/ranked_jobs.json has a single writer: the worker
-running a "rank" task (audit M7). The only in-process ranking left is the
-DB-less Streamlit demo (ui/views/jobs.py), where there is no queue at all.
+UI, the CLIs and the worker. data/ranked_jobs.json is written in exactly one
+place, _write_ranked() here (audit M7): by the worker running a "rank" task,
+and by rank_and_publish() for the callers that rank in-process -- the
+DB-less Streamlit demo (ui/views/jobs.py, which has no queue at all) and the
+CLIs (backend.main, job_scraper.run_real_ranking).
 
 request_ranking() enqueues (API + UI); status_from_task() maps the latest
 rank task onto the v1 RankingStatus contract; run_rank_task() is the worker
@@ -129,6 +131,25 @@ def ranking_status(ranked_file_exists: bool) -> dict:
     return status_from_task(latest_rank_task(), ranked_file_exists)
 
 
+def _write_ranked(ranked: list[dict]) -> None:
+    """The one place RANKED_FILE is written (atomic replace). Everything
+    that produces rankings -- the worker, the DB-less demo, the CLIs --
+    ends here."""
+    write_json_atomic(RANKED_FILE, ranked)
+
+
+def rank_and_publish(profile: dict, jobs: list[dict]) -> list[dict]:
+    """Rank `jobs` in this process and publish the result as RANKED_FILE.
+
+    For the callers that rank outside the queue: the DB-less Streamlit demo
+    (it has no queue) and the CLIs (backend.main, which ranks its
+    domain-filtered corpus, and job_scraper.run_real_ranking). Returns the
+    ranked list."""
+    ranked = _rank_jobs(profile, jobs)
+    _write_ranked(ranked)
+    return ranked
+
+
 def run_rank_task(payload: dict, ctx: Any = None) -> dict:
     """Worker handler for "rank" tasks. Ranks against the Postgres corpus
     only (strict mode: CorpusUnavailable instead of a stale JSON
@@ -139,7 +160,7 @@ def run_rank_task(payload: dict, ctx: Any = None) -> dict:
     ranked = _rank_jobs(profile, snap.jobs)
     if ctx is not None:
         ctx.ensure_lease()
-    write_json_atomic(RANKED_FILE, ranked)
+    _write_ranked(ranked)
     return {"ranked_count": len(ranked),
             "corpus_version": corpus_version_str(snap.version),
             "formula_version": FORMULA_VERSION}

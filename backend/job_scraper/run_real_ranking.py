@@ -21,7 +21,7 @@ Run from project root:
 import sys
 import json
 from ..config import DATA_DIR, PROFILE_FILE, RANKED_FILE
-from ..matching_engine.matcher import rank_jobs
+from ..services.ranking import rank_and_publish
 
 def _get_or_create_current_user(profile):
     """Uses the PROFILE's identity, so impressions land under the same user
@@ -43,12 +43,11 @@ def main(log_impressions_to_db=False):
     print("Ranking... (this downloads/loads the embedding model, may take a moment)")
     print()
 
-    ranked = rank_jobs(profile, jobs, candidate_is_fresher=True)
-
-    # Persist the ranked list so downstream tools (resume_tailor, cover
-    # letters, Streamlit UI) don't have to re-run the whole ranking pipeline.
-    with open(RANKED_FILE, "w", encoding="utf-8") as f:
-        json.dump(ranked, f, ensure_ascii=False, indent=2)
+    # Rank and persist the list so downstream tools (resume_tailor, cover
+    # letters, Streamlit UI) don't have to re-run the whole ranking
+    # pipeline. Written through the ranking service, the single writer of
+    # RANKED_FILE (audit M7).
+    ranked = rank_and_publish(profile, jobs)
     print(f"Saved ranked list to {RANKED_FILE}")
 
     print(f"Jobs remaining after dedup + hard gates: {len(ranked)}")

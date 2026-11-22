@@ -12,8 +12,9 @@ Two ways a ranking runs (ADR-001 §2):
   POST /v1/rankings -- and the page polls the task's status. The worker
   (python -m backend.worker) is the only writer of ranked_jobs.json.
 - No database (the Streamlit Cloud demo): _rerank_inline() ranks in this
-  process. It is the ONLY in-process ranking path left, and exists because
-  a DB-less deployment has no queue and no worker.
+  process via services.ranking.rank_and_publish(). It is the only
+  in-process ranking path the UI has, and exists because a DB-less
+  deployment has no queue and no worker.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ import streamlit as st
 
 from backend.config import RANKED_FILE
 from backend.database.corpus import (db_configured, load_corpus,
-                                     load_corpus_snapshot, write_json_atomic)
+                                     load_corpus_snapshot)
 from .. import theme
 
 RANK_POLL_S = 5          # status refresh while a queued ranking runs
@@ -48,14 +49,15 @@ def _load_descriptions(corpus_version: tuple, _jobs: list[dict]) -> dict:
 
 
 def _rerank_inline(profile: dict) -> None:
-    """Demo mode only (no database configured): rank in this process."""
-    from backend.matching_engine.matcher import rank_jobs
+    """Demo mode only (no database configured): rank in this process,
+    publishing through the ranking service like every other writer (an
+    atomic replace, so two demo sessions reranking at once can't
+    interleave)."""
+    from backend.services.ranking import rank_and_publish
     jobs = load_corpus()
     with st.spinner(f"Ranking {len(jobs):,} jobs against your profile — "
                     "this takes a few minutes (embedding model)..."):
-        ranked = rank_jobs(profile, jobs, candidate_is_fresher=True)
-    # Atomic replace: two demo sessions reranking at once can't interleave.
-    write_json_atomic(RANKED_FILE, ranked)
+        rank_and_publish(profile, jobs)
     st.cache_data.clear()
     st.rerun()
 
