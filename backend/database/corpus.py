@@ -470,14 +470,26 @@ def load_corpus(jobs_file: Path | str | None = None,
 # JSON export
 # --------------------------------------------------------------------------
 def write_json_atomic(path: Path | str, data: Any) -> None:
-    """Write-then-rename so a concurrent load_corpus() never reads a
-    half-written file."""
+    """Write-then-rename so a concurrent reader never sees a half-written
+    file. The temp name is unique per call, so two concurrent writers (two
+    demo-mode reranks, or a worker that lost its lease racing its
+    successor) can't interleave inside one temp file: each rename installs
+    one complete document, and the last one wins. (Not tempfile.mkstemp:
+    its 0600 mode would change the output file's permissions.)"""
+    import uuid
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def export_corpus_json(path: Path | str | None = None) -> int:
