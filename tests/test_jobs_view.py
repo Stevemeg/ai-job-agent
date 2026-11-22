@@ -1,17 +1,28 @@
 """Streamlit jobs view: demo mode (no DB) still ranks inline; queue mode (DB
 configured) enqueues through services.ranking and never ranks in-process.
-Runs the real view under streamlit.testing (skipped where Streamlit isn't
-installed, e.g. the slim CI install); the ranking engine and the queue are
-stubbed."""
+Runs the real view under streamlit.testing; the ranking engine and the
+queue are stubbed.
+
+Streamlit is skipped per test (in the fixture), never at module level: the
+slim CI install has no Streamlit, and a module-level skip would be reported
+even by the `-m db` run, whose "no skipped tests" guard would then fail."""
 import json
 
 import pytest
 
-pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest           # noqa: E402
+from backend.database import corpus
 
-import backend.ui.views.jobs as jobs_view          # noqa: E402
-from backend.database import corpus                # noqa: E402
+
+@pytest.fixture
+def jobs_view():
+    pytest.importorskip("streamlit")
+    import backend.ui.views.jobs as view
+    return view
+
+
+def _app():
+    from streamlit.testing.v1 import AppTest
+    return AppTest.from_function(_view)
 
 
 def _view():
@@ -23,7 +34,7 @@ def _view():
 
 
 @pytest.fixture
-def page(tmp_path, monkeypatch, profile):
+def page(tmp_path, monkeypatch, profile, jobs_view):
     import backend.config as config
     profile_file = tmp_path / "candidate_profile.json"
     profile_file.write_text(json.dumps(profile), encoding="utf-8")
@@ -57,7 +68,7 @@ def test_demo_mode_ranks_inline_exactly_as_before(page, monkeypatch):
     import backend.services.ranking as ranking
     monkeypatch.setattr(ranking, "request_ranking", no_queue)
 
-    at = AppTest.from_function(_view).run()
+    at = _app().run()
     assert not at.exception
     button = next(b for b in at.button if b.label == "Rank jobs now")
     at = button.click().run()
@@ -67,7 +78,7 @@ def test_demo_mode_ranks_inline_exactly_as_before(page, monkeypatch):
 
 
 def test_queue_mode_enqueues_and_shows_status_without_ranking_inline(
-        page, monkeypatch):
+        page, monkeypatch, jobs_view):
     monkeypatch.setenv("DB_HOST", "db.invalid")        # configured
     import backend.services.ranking as ranking
     state = {"task": None}
@@ -84,7 +95,7 @@ def test_queue_mode_enqueues_and_shows_status_without_ranking_inline(
     # Keep the corpus read on the JSON file (no real DB behind DB_HOST).
     monkeypatch.setattr(corpus, "db_available", lambda: False)
 
-    at = AppTest.from_function(_view).run()
+    at = _app().run()
     assert not at.exception
     button = next(b for b in at.button if b.label == "Rank jobs now")
     at = button.click().run()
