@@ -13,7 +13,13 @@ documented by their respective platforms:
 Output is normalized into the SAME schema your existing job_parser.parse_job
 already produces, by reusing its clean_job_description / extract_experience /
 detect_seniority helpers — so this plugs directly into matcher.rank_jobs with
-zero changes downstream.
+zero changes downstream. Each job also carries "postings": the ATS's own
+posting id (plus location/link), which canonical_jobs uses to keep the same
+title posted in several locations as ONE job with several postings.
+
+Where results go (save_collected_jobs):
+  - database configured + reachable -> upsert into canonical_jobs
+  - otherwise -> deduped merge into data/jobs.json
 
 Run (from project root, one level above backend/):
     python -m backend.job_scraper.ats_collector
@@ -22,7 +28,7 @@ import time
 import requests
 
 from .job_parser import clean_job_description, extract_experience, detect_seniority
-from ..config import DATA_DIR
+from ..config import JOBS_FILE
 
 # --------------------------------------------------------------------------
 # SEED COMPANIES — curated, AI/ML/Data/Backend-heavy. Add more as you find
@@ -78,10 +84,17 @@ def _get_with_retries(url, params=None):
     return None
 
 
-def _normalize(title, company, location, tags, description_html, apply_link):
+def _normalize(title, company, location, tags, description_html, apply_link,
+               ats=None, posting_id=None):
     """Build the exact dict shape job_parser.parse_job already produces,
-    so output is a drop-in match for the existing pipeline."""
+    so output is a drop-in match for the existing pipeline -- plus the ATS
+    posting identity, which the matcher ignores and the corpus layer keys
+    postings on."""
     cleaned = clean_job_description(description_html or "")
+    postings = []
+    if posting_id not in (None, ""):
+        postings.append({"source": ats, "posting_id": str(posting_id),
+                         "location": location, "apply_link": apply_link})
     return {
         "title": title,
         "company": company,
@@ -92,6 +105,7 @@ def _normalize(title, company, location, tags, description_html, apply_link):
         "clean_description": cleaned,
         "apply_link": apply_link,
         "source": "ats",          # lets you trace provenance later
+        "postings": postings,     # [{source: greenhouse|lever|ashby, posting_id, ...}]
     }
 
 
@@ -116,6 +130,8 @@ def fetch_greenhouse_jobs(company_token):
             tags=tags,
             description_html=j.get("content"),
             apply_link=j.get("absolute_url"),
+            ats="greenhouse",
+            posting_id=j.get("id"),     # per-posting id (not internal_job_id)
         ))
     print(f"  [greenhouse] {company_token}: {len(jobs)} jobs")
     return jobs
@@ -144,6 +160,8 @@ def fetch_lever_jobs(company_slug):
             tags=tags,
             description_html=j.get("descriptionPlain") or j.get("description"),
             apply_link=j.get("applyUrl") or j.get("hostedUrl"),
+            ats="lever",
+            posting_id=j.get("id"),
         ))
     print(f"  [lever] {company_slug}: {len(jobs)} jobs")
     return jobs
@@ -169,6 +187,8 @@ def fetch_ashby_jobs(job_board_name):
             tags=tags,
             description_html=j.get("descriptionPlain") or j.get("descriptionHtml"),
             apply_link=j.get("applyUrl") or j.get("jobUrl"),
+            ats="ashby",
+            posting_id=j.get("id"),
         ))
     print(f"  [ashby] {job_board_name}: {len(jobs)} jobs")
     return jobs
@@ -200,28 +220,52 @@ def collect_all_ats_jobs():
     return all_jobs
 
 
-def merge_into_jobs_file(new_jobs):
-    """Appends ATS jobs onto the existing data/jobs.json (RemoteOK jobs stay).
-    Uses config.JOBS_FILE so this respects the same path your matcher reads
-    from — avoids the '../data' fragility the original job_database.py had."""
+def merge_into_jobs_file(new_jobs, jobs_path=None):
+    """JSON-only path (no database): merge ATS jobs into data/jobs.json,
+    DEDUPED on (company, normalized title) -- the canonical_jobs key --
+    instead of appending (appending duplicated every job on each re-run).
+    Same rules as the DB upsert: a job keeps its first position, the latest
+    sighting's fields win, postings are merged. Existing entries from other
+    sources (RemoteOK) stay. Returns {"total", "added", "updated"}."""
     import json
+    from pathlib import Path
+    from ..database.corpus import dedupe_jobs, job_key, write_json_atomic
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    jobs_path = DATA_DIR / "jobs.json"
-
+    jobs_path = Path(jobs_path) if jobs_path is not None else JOBS_FILE
     existing = []
     if jobs_path.exists():
         with open(jobs_path, "r", encoding="utf-8") as f:
             existing = json.load(f)
 
-    combined = existing + new_jobs
-    with open(jobs_path, "w", encoding="utf-8") as f:
-        json.dump(combined, f, indent=4, ensure_ascii=False)
+    known = {job_key(j) for j in existing}
+    incoming = {job_key(j) for j in new_jobs}
+    combined = dedupe_jobs(existing + list(new_jobs))
+    write_json_atomic(jobs_path, combined)
 
-    print(f"Wrote {len(combined)} total jobs to {jobs_path} "
-          f"({len(existing)} existing + {len(new_jobs)} new from ATS)")
+    stats = {"total": len(combined), "added": len(incoming - known),
+             "updated": len(incoming & known)}
+    print(f"Wrote {stats['total']} jobs to {jobs_path} "
+          f"({stats['added']} new, {stats['updated']} re-sighted, "
+          f"{len(existing)} before)")
+    return stats
+
+
+def save_collected_jobs(jobs):
+    """Persist a collection run: upsert into canonical_jobs when a database
+    is configured and reachable, else dedupe-merge into data/jobs.json. A DB
+    write failure raises rather than silently writing JSON instead -- that
+    would quietly split the corpus across two stores."""
+    from ..database.corpus import db_available, upsert_jobs
+
+    if db_available():
+        stats = upsert_jobs(jobs)
+        print(f"Upserted into canonical_jobs: {stats['inserted']} new, "
+              f"{stats['updated']} re-sighted ({stats['changed']} changed)")
+        return stats
+    print("No database configured/reachable -- writing the JSON corpus.")
+    return merge_into_jobs_file(jobs)
 
 
 if __name__ == "__main__":
     jobs = collect_all_ats_jobs()
-    merge_into_jobs_file(jobs)
+    save_collected_jobs(jobs)
