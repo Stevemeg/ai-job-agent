@@ -137,6 +137,40 @@ def test_load_corpus_falls_back_to_json_when_db_holds_no_corpus(pg, tmp_path):
     assert (snap.source, snap.jobs) == ("jobs_file", [{"title": "From JSON"}])
 
 
+def test_strict_mode_reads_the_db_corpus(pg):
+    corpus.upsert_jobs([_job("From DB")])
+    snap = corpus.load_corpus_snapshot(require_db=True)
+    assert snap.source == "db"
+    assert [j["title"] for j in snap.jobs] == ["From DB"]
+
+
+def test_strict_mode_empty_db_raises_instead_of_using_json(pg, tmp_path):
+    jobs_file = tmp_path / "jobs.json"
+    jobs_file.write_text(json.dumps([{"title": "From JSON"}]), encoding="utf-8")
+    with pytest.raises(corpus.CorpusUnavailable) as err:
+        corpus.load_corpus_snapshot(jobs_file, tmp_path / "s.json", require_db=True)
+    assert err.value.reason == "empty"
+
+
+def test_strict_mode_recovers_once_the_db_is_reachable_again(pg, monkeypatch):
+    """The probe goes through the env-built URL; pointing it at a closed
+    port simulates an outage without touching the test schema's engine."""
+    import socket
+    corpus.upsert_jobs([_job("From DB")])
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    with monkeypatch.context() as m:
+        m.delenv("DATABASE_URL", raising=False)
+        m.setenv("DB_HOST", "127.0.0.1")
+        m.setenv("DB_PORT", str(closed))
+        m.setenv("DB_CONNECT_TIMEOUT", "2")
+        with pytest.raises(corpus.CorpusUnavailable) as err:
+            corpus.load_corpus_snapshot(require_db=True)
+        assert err.value.reason == "unreachable"
+    assert corpus.load_corpus_snapshot(require_db=True).source == "db"
+
+
 def test_db_snapshot_cache_refreshes_after_an_upsert(pg, tmp_path):
     corpus.upsert_jobs([_job("One")])
     first = corpus.load_corpus_snapshot()

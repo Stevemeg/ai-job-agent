@@ -152,6 +152,41 @@ def test_fallback_order_db_unreachable_then_jobs_then_sample(corpus_files,
     assert probes == [1]                     # reachability cached per process
 
 
+def test_strict_mode_unreachable_db_raises_every_call_and_never_falls_back(
+        corpus_files, monkeypatch):
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("psycopg2")
+    monkeypatch.setenv("DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("DB_PORT", str(_closed_port()))
+    monkeypatch.setenv("DB_CONNECT_TIMEOUT", "2")
+    probes = []
+    real_probe_error = corpus._probe_error
+    monkeypatch.setattr(corpus, "_probe_error",
+                        lambda: probes.append(1) or real_probe_error())
+    jobs_file, sample_file = corpus_files          # a fallback that must be ignored
+
+    for _ in range(2):
+        with pytest.raises(corpus.CorpusUnavailable) as err:
+            corpus.load_corpus_snapshot(jobs_file, sample_file, require_db=True)
+        assert err.value.reason == "unreachable"
+    assert probes == [1, 1]                  # re-probed: failure not cached
+    assert corpus._probe_result is None      # nor leaked into default mode
+
+    # Default mode is untouched: it still falls back (and caches its probe).
+    snap = corpus.load_corpus_snapshot(jobs_file, sample_file)
+    assert (snap.source, snap.jobs) == ("jobs_file", [{"title": "Real"}])
+
+
+def test_strict_mode_without_a_configured_db_raises_without_probing(
+        corpus_files, monkeypatch):
+    def _no_probe():
+        raise AssertionError("probed a DB that was never configured")
+    monkeypatch.setattr(corpus, "_probe_error", _no_probe)
+    with pytest.raises(corpus.CorpusUnavailable) as err:
+        corpus.load_corpus_snapshot(*corpus_files, require_db=True)
+    assert err.value.reason == "not_configured"
+
+
 def test_json_path_is_cached_on_mtime(corpus_files):
     import os
     jobs_file, sample_file = corpus_files

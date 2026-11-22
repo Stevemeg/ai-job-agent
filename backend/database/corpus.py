@@ -16,6 +16,12 @@ Read order -- load_corpus():
 "Configured" must be explicit: a DB-less deployment (the Streamlit Cloud
 demo) never attempts a connection at all, so its behaviour is unchanged.
 
+Strict mode -- load_corpus_snapshot(require_db=True), used by the worker:
+Postgres or nothing. Instead of falling back to JSON it raises
+CorpusUnavailable (not configured, unreachable, read failed, or no collected
+rows), and it re-probes on every call: a failure is never cached, so a
+long-lived worker recovers as soon as the database does.
+
 Every loader returns the dict shape matcher.rank_jobs consumes today (what
 job_parser.parse_job / ats_collector._normalize produce). DB rows add
 "postings".
@@ -59,6 +65,16 @@ _lock = threading.Lock()
 _probe_result: bool | None = None  # DB reachability, cached per process
 _json_cache: tuple | None = None   # ((path, mtime), jobs)
 _db_cache: tuple | None = None     # (("db", count, max_last_seen), jobs)
+
+
+class CorpusUnavailable(RuntimeError):
+    """Strict mode (require_db=True) could not serve the corpus from
+    Postgres. `reason` is one of: "not_configured", "unreachable",
+    "read_failed", "empty"."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -171,7 +187,9 @@ def _connect_timeout() -> int:
         return DEFAULT_CONNECT_TIMEOUT_S
 
 
-def _probe() -> bool:
+def _probe_error() -> Exception | None:
+    """One short-timeout connection attempt; the failure, or None if the
+    database answered."""
     try:
         from sqlalchemy import create_engine, text
         from sqlalchemy.pool import NullPool
@@ -184,12 +202,18 @@ def _probe() -> bool:
                 conn.execute(text("SELECT 1"))
         finally:
             engine.dispose()
-        return True
+        return None
     except Exception as exc:                                # noqa: BLE001
+        return exc
+
+
+def _probe() -> bool:
+    exc = _probe_error()
+    if exc is not None:
         log.warning("corpus: database configured but unreachable (%s); "
                     "using the JSON corpus for this process",
                     exc.__class__.__name__)
-        return False
+    return exc is None
 
 
 def db_available() -> bool:
@@ -339,10 +363,14 @@ def _read_db_jobs(conn: Any) -> list[dict]:
     return [_row_to_job(r) for r in rows]
 
 
-def _db_snapshot() -> CorpusSnapshot | None:
-    """The DB corpus, or None if it is empty or unreadable. A read failure
-    marks the DB unavailable for the rest of the process: the default engine
-    has no connect timeout, so retrying per request could hang every one."""
+def _db_snapshot(strict: bool = False) -> CorpusSnapshot | None:
+    """The DB corpus, or None if it is empty or unreadable.
+
+    Default mode: a read failure marks the DB unavailable for the rest of
+    the process (the default engine has no connect timeout, so retrying per
+    request could hang every one). Strict mode raises CorpusUnavailable
+    instead and caches nothing -- its caller has just probed with a short
+    timeout, and will probe again next call."""
     global _db_cache, _probe_result
     try:
         from sqlalchemy import func, select
@@ -354,20 +382,42 @@ def _db_snapshot() -> CorpusSnapshot | None:
             count, latest = conn.execute(
                 select(func.count(), func.max(t.c.last_seen_at))
                 .where(t.c.content_hash.isnot(None))).one()
-            if not count:
-                return None
-            key = ("db", count, latest)
-            cached = _db_cache
-            if cached is None or cached[0] != key:
-                cached = (key, _read_db_jobs(conn))
-                _db_cache = cached
-        return CorpusSnapshot(jobs=cached[1], source="db", version=key)
+            snap = None
+            if count:
+                key = ("db", count, latest)
+                cached = _db_cache
+                if cached is None or cached[0] != key:
+                    cached = (key, _read_db_jobs(conn))
+                    _db_cache = cached
+                snap = CorpusSnapshot(jobs=cached[1], source="db", version=key)
     except Exception as exc:                                # noqa: BLE001
+        if strict:
+            raise CorpusUnavailable(
+                "read_failed", f"database corpus read failed "
+                f"({exc.__class__.__name__}: {exc})") from exc
         log.warning("corpus: database read failed (%s: %s); using the JSON "
                     "corpus for this process", exc.__class__.__name__, exc)
         with _lock:
             _probe_result = False
         return None
+    if snap is None and strict:
+        raise CorpusUnavailable(
+            "empty", "the database holds no collected jobs -- seed it with "
+            "`python -m backend.database.corpus import` or run the collector")
+    return snap
+
+
+def _strict_db_snapshot() -> CorpusSnapshot:
+    if not db_configured():
+        raise CorpusUnavailable(
+            "not_configured", "no database configured (set DATABASE_URL or "
+            "DB_HOST); strict corpus mode never falls back to JSON")
+    exc = _probe_error()                  # every call: failures aren't cached
+    if exc is not None:
+        raise CorpusUnavailable(
+            "unreachable", f"database configured but unreachable "
+            f"({exc.__class__.__name__})") from exc
+    return _db_snapshot(strict=True)
 
 
 def _json_snapshot(jobs_file: Path, sample_file: Path) -> CorpusSnapshot:
@@ -391,9 +441,15 @@ def _json_snapshot(jobs_file: Path, sample_file: Path) -> CorpusSnapshot:
 
 
 def load_corpus_snapshot(jobs_file: Path | str | None = None,
-                         sample_file: Path | str | None = None) -> CorpusSnapshot:
+                         sample_file: Path | str | None = None, *,
+                         require_db: bool = False) -> CorpusSnapshot:
     """DB first, then jobs_file, then sample_file (defaults: config paths,
-    read at call time so tests can monkeypatch them)."""
+    read at call time so tests can monkeypatch them).
+
+    require_db=True: Postgres only -- raises CorpusUnavailable rather than
+    falling back, re-probing on every call; the file arguments are unused."""
+    if require_db:
+        return _strict_db_snapshot()
     if db_available():
         snap = _db_snapshot()
         if snap is not None:
