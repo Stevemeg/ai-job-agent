@@ -154,3 +154,35 @@ def jobs():
         desc = "General software role." + (" Docker." if i < 6 else "")
         corpus.append(job(f"Accountant {i}", desc))
     return corpus
+
+
+# ---- ranking -----------------------------------------------------------------
+
+def fake_semantic_score(candidate_text, job_text):
+    """Deterministic stand-in for the embedding similarity (CI has no
+    torch): a stable function of both texts, in [0, 1). Everything else in
+    the matcher -- gates, skill/role/seniority scores, explainer -- is real."""
+    import hashlib
+    digest = hashlib.sha256(f"{candidate_text}\x00{job_text}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") / 2 ** 32
+
+
+@pytest.fixture
+def stub_semantic(monkeypatch):
+    from backend.matching_engine import scorer
+    monkeypatch.setattr(scorer, "semantic_score", fake_semantic_score)
+    return fake_semantic_score
+
+
+@pytest.fixture
+def rank_files(tmp_path, monkeypatch, profile):
+    """(profile_file, ranked_file) under tmp_path, patched into
+    services.ranking (the profile is the `profile` fixture's)."""
+    import json
+    from backend.services import ranking
+    profile_file = tmp_path / "candidate_profile.json"
+    profile_file.write_text(json.dumps(profile), encoding="utf-8")
+    ranked_file = tmp_path / "ranked_jobs.json"
+    monkeypatch.setattr(ranking, "PROFILE_FILE", profile_file)
+    monkeypatch.setattr(ranking, "RANKED_FILE", ranked_file)
+    return profile_file, ranked_file

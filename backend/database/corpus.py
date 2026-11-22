@@ -359,15 +359,20 @@ def _row_to_job(row: Any) -> dict:
     return job
 
 
-def _read_db_jobs(conn: Any) -> list[dict]:
+def _select_corpus(*extra: str) -> Any:
+    """Collected rows (content_hash set) in corpus order (id), as the
+    load_corpus() shape plus any `extra` canonical_jobs columns."""
     from sqlalchemy import select
     from .db import CanonicalJob
     t = CanonicalJob.__table__
-    rows = conn.execute(
-        select(*[t.c[f] for f in JOB_FIELDS], t.c.postings)
-        .where(t.c.content_hash.isnot(None))
-        .order_by(t.c.id)).mappings().all()
-    return [_row_to_job(r) for r in rows]
+    return (select(*[t.c[f] for f in JOB_FIELDS], t.c.postings,
+                   *[t.c[c] for c in extra])
+            .where(t.c.content_hash.isnot(None))
+            .order_by(t.c.id))
+
+
+def _read_db_jobs(conn: Any) -> list[dict]:
+    return [_row_to_job(r) for r in conn.execute(_select_corpus()).mappings()]
 
 
 def _db_snapshot(strict: bool = False) -> CorpusSnapshot | None:
@@ -414,7 +419,10 @@ def _db_snapshot(strict: bool = False) -> CorpusSnapshot | None:
     return snap
 
 
-def _strict_db_snapshot() -> CorpusSnapshot:
+def require_database() -> None:
+    """Strict mode's availability check: raises CorpusUnavailable
+    ("not_configured" or "unreachable") unless a database is configured and
+    answers right now (short connect timeout). Never cached."""
     if not db_configured():
         raise CorpusUnavailable(
             "not_configured", "no database configured (set DATABASE_URL or "
@@ -424,7 +432,50 @@ def _strict_db_snapshot() -> CorpusSnapshot:
         raise CorpusUnavailable(
             "unreachable", f"database configured but unreachable "
             f"({exc.__class__.__name__})") from exc
+
+
+def _strict_db_snapshot() -> CorpusSnapshot:
+    require_database()
     return _db_snapshot(strict=True)
+
+
+@dataclass(frozen=True)
+class CorpusRows:
+    """The strict DB corpus WITH identity: (canonical_jobs.id, job) pairs in
+    corpus order -- the same jobs, order and dict shape as
+    load_corpus_snapshot(require_db=True).jobs. `version` has the same
+    format as CorpusSnapshot.version, computed from these very rows."""
+    rows: list
+    version: tuple
+
+    @property
+    def jobs(self) -> list[dict]:
+        return [job for _, job in self.rows]
+
+
+def load_corpus_rows() -> CorpusRows:
+    """Strict mode with job ids, for incremental ranking (scores are keyed
+    on canonical_jobs.id). Raises CorpusUnavailable exactly as
+    load_corpus_snapshot(require_db=True) does. Never cached: a rank
+    execution reads the corpus fresh, once it holds the rank lock."""
+    require_database()
+    try:
+        from .db import get_engine, init_db
+        init_db()
+        with get_engine().connect() as conn:
+            fetched = conn.execute(
+                _select_corpus("id", "last_seen_at")).mappings().all()
+    except Exception as exc:                                # noqa: BLE001
+        raise CorpusUnavailable(
+            "read_failed", f"database corpus read failed "
+            f"({exc.__class__.__name__}: {exc})") from exc
+    if not fetched:
+        raise CorpusUnavailable(
+            "empty", "the database holds no collected jobs -- seed it with "
+            "`python -m backend.database.corpus import` or run the collector")
+    rows = [(r["id"], _row_to_job(r)) for r in fetched]
+    return CorpusRows(rows=rows, version=(
+        "db", len(rows), max(r["last_seen_at"] for r in fetched)))
 
 
 def _json_snapshot(jobs_file: Path, sample_file: Path) -> CorpusSnapshot:

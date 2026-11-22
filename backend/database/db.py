@@ -256,8 +256,9 @@ class JobScore(Base):
     content_hash = Column(Text, nullable=False)
     passed = Column(Boolean, nullable=False)           # the hard gates
     match_score = Column(Numeric)                      # NULL when gated out
-    score_breakdown = Column(JSONB)                    # {skill_overlap, semantic, role, seniority}
-    explanation = Column(JSONB)                        # {strong_matches, likely_matches, missing_skills}
+    # none_as_null: a gated-out row's None is SQL NULL, not JSON null.
+    score_breakdown = Column(JSONB(none_as_null=True))  # {skill_overlap, semantic, role, seniority}
+    explanation = Column(JSONB(none_as_null=True))      # {strong_matches, likely_matches, missing_skills}
     scored_at = Column(TIMESTAMP(timezone=True), nullable=False,
                        server_default=func.now())
 
