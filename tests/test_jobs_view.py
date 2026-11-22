@@ -7,6 +7,8 @@ Streamlit is skipped per test (in the fixture), never at module level: the
 slim CI install has no Streamlit, and a module-level skip would be reported
 even by the `-m db` run, whose "no skipped tests" guard would then fail."""
 import json
+import sys
+import types
 
 import pytest
 
@@ -56,12 +58,20 @@ def _ranked(n=12):            # the view needs >= 10 (its "Show top N" minimum)
             for i in range(n)]
 
 
+def _stub_matcher(monkeypatch, rank_jobs):
+    """Stand-in for backend.matching_engine.matcher. Importing the real one
+    pulls in sklearn and sentence-transformers (torch); a stub module in
+    sys.modules means the view's deferred `from ...matcher import rank_jobs`
+    never touches them."""
+    fake = types.ModuleType("backend.matching_engine.matcher")
+    fake.rank_jobs = rank_jobs
+    monkeypatch.setitem(sys.modules, "backend.matching_engine.matcher", fake)
+
+
 def test_demo_mode_ranks_inline_exactly_as_before(page, monkeypatch):
-    pytest.importorskip("sklearn")         # matcher's import chain
-    import backend.matching_engine.matcher as matcher
     calls = []
-    monkeypatch.setattr(matcher, "rank_jobs",
-                        lambda p, j, candidate_is_fresher: calls.append(j) or _ranked())
+    _stub_matcher(monkeypatch,
+                  lambda p, j, candidate_is_fresher: calls.append(j) or _ranked())
 
     def no_queue(*a, **k):
         raise AssertionError("demo mode must not touch the queue")
