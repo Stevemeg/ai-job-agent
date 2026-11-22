@@ -11,10 +11,8 @@ The final score is an interpretable blend you can show the user AND defend in
 an interview: "0.82 = 0.40*skill + 0.30*semantic + 0.20*role + 0.10*seniority".
 """
 import re
-from sklearn.metrics.pairwise import cosine_similarity
 
 from ..config import WEIGHTS, HARD_FILTERS
-from ..embeddings import get_model
 from .role_scorer import compute_role_score   # reused, normalized below
 from .requirement_extractor import extract_requirements
 from .skill_taxonomy import any_surface_form_present
@@ -95,6 +93,11 @@ def skill_overlap_score(candidate_skills, job_tags, job_description=""):
 
 
 def semantic_score(candidate_text, job_text):
+    # Deferred imports: sklearn and the embedding model (sentence-transformers
+    # / torch) load on the first semantic score, so the gates, the other
+    # sub-scores, the explainer and the matcher import without the ML stack.
+    from sklearn.metrics.pairwise import cosine_similarity
+    from ..embeddings import get_model
     model = get_model()
     emb = model.encode([candidate_text, job_text])
     return float(cosine_similarity([emb[0]], [emb[1]])[0][0])
