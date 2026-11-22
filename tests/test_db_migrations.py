@@ -171,6 +171,74 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
         "idx_events_job_id", "idx_events_event_type"}
 
 
+def _event_check_oid(engine):
+    with engine.connect() as conn:
+        return conn.execute(text(
+            "SELECT c.oid FROM pg_constraint c "
+            "WHERE c.conrelid = 'events'::regclass AND c.conname = :n"),
+            {"n": db.EVENT_TYPE_CHECK_NAME}).scalar()
+
+
+def _migrate(monkeypatch):
+    monkeypatch.setattr(db, "_initialized", False)
+    db.init_db()
+
+
+@pytest.mark.parametrize("built_from", ["orm", "schema_sql", "old_schema"])
+def test_rerunning_migrations_never_rewrites_the_events_check(
+        pg, monkeypatch, built_from):
+    """Only a stale constraint is dropped and re-added; once current, every
+    later run leaves the same pg_constraint row (same oid) in place."""
+    if built_from == "schema_sql":
+        with pg.begin() as conn:
+            conn.exec_driver_sql(SCHEMA_SQL.read_text(encoding="utf-8"))
+    elif built_from == "old_schema":
+        with pg.begin() as conn:
+            conn.exec_driver_sql(OLD_SCHEMA)
+    before = _event_check_oid(pg) if built_from != "orm" else None
+
+    _migrate(monkeypatch)
+    first = _event_check_oid(pg)
+    if built_from == "old_schema":
+        assert first != before                     # stale -> rewritten once
+    elif built_from == "schema_sql":
+        assert first == before                     # already current
+
+    _migrate(monkeypatch)
+    db._run_migrations()                           # the bare entry point too
+    assert _event_check_oid(pg) == first
+
+
+def test_migrations_take_the_advisory_lock(pg, monkeypatch):
+    """A second migrator blocks on pg_advisory_xact_lock while the first
+    holds it (no interleaved DDL), then completes once it is released."""
+    import threading
+    db.init_db()
+    holder = pg.connect()
+    trans = holder.begin()
+    holder.execute(text("SELECT pg_advisory_xact_lock(:k)"),
+                   {"k": db._MIGRATION_LOCK_KEY})
+    done = threading.Event()
+    errors = []
+
+    def migrate():
+        try:
+            db._run_migrations()
+        except Exception as exc:                   # noqa: BLE001
+            errors.append(exc)
+        done.set()
+
+    t = threading.Thread(target=migrate)
+    t.start()
+    try:
+        assert not done.wait(1.0)                  # blocked behind the lock
+    finally:
+        trans.rollback()                           # releases the xact lock
+        holder.close()
+    t.join(10)
+    assert done.is_set() and not errors
+
+
 def test_fresh_database_init_is_idempotent(pg, monkeypatch):
     _run_init_twice(monkeypatch)
     with pg.begin() as conn:

@@ -12,6 +12,7 @@ Usage:
         user = session.query(User).filter_by(email="...").first()
 """
 import os
+import re
 from contextlib import contextmanager
 
 from sqlalchemy import (
@@ -209,43 +210,88 @@ class Task(Base):
 
 _initialized = False
 
+# pg_advisory_xact_lock key serializing schema setup across processes (API,
+# UI and worker can all start at once against a fresh database).
+# Transaction-scoped: released on commit/rollback.
+_MIGRATION_LOCK_KEY = 0x6D696772   # b"migr"
+
 
 def init_db():
     """Creates all tables if they don't already exist and applies additive
     migrations. Idempotent AND memoized per process -- callers (tracker UI,
     API routes) may invoke this on every request without paying CREATE/ALTER
-    round-trips each time (audit fix)."""
+    round-trips each time (audit fix). create_all() and the migrations run
+    in one transaction under the migration lock, so concurrent first
+    starts can't race each other's CREATE TABLE."""
     global _initialized
     if _initialized:
         return
-    Base.metadata.create_all(get_engine())
-    _run_migrations()
+    with get_engine().begin() as conn:
+        _take_migration_lock(conn)
+        Base.metadata.create_all(conn)
+        _run_migrations(conn)
     _initialized = True
 
 
-def _run_migrations():
+def _take_migration_lock(conn):
+    # Re-entrant within one session, so init_db -> _run_migrations is fine.
+    conn.execute(text("SELECT pg_advisory_xact_lock(:k)"),
+                 {"k": _MIGRATION_LOCK_KEY})
+
+
+_SQL_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+
+
+def event_type_check_is_current(constraint_def):
+    """True if a pg_get_constraintdef() of events_event_type_check allows
+    exactly VALID_EVENT_TYPES. Compares the value set, not the text:
+    Postgres deparses IN (...) differently for a TEXT column (schema.sql)
+    and a VARCHAR one (the ORM), so no single expected string fits both."""
+    if not constraint_def or "event_type" not in constraint_def:
+        return False
+    values = [v.replace("''", "'") for v in _SQL_LITERAL.findall(constraint_def)]
+    return sorted(values) == sorted(VALID_EVENT_TYPES)
+
+
+def _event_type_check_def(conn):
+    return conn.execute(text(
+        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "WHERE c.conrelid = 'events'::regclass AND c.contype = 'c' "
+        "AND c.conname = :name"), {"name": EVENT_TYPE_CHECK_NAME}).scalar()
+
+
+def _run_migrations(conn=None):
     """Idempotent, additive migrations for columns added after the original
     schema.sql shipped. create_all() does NOT alter existing tables, so
     databases created before a column existed need these. Each statement is
-    IF NOT EXISTS -- safe to run on every startup. (Whole new tables, like
-    tasks, need nothing here: create_all() creates missing tables.)"""
-    with get_engine().begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE events ADD COLUMN IF NOT EXISTS note TEXT"))
-        # v2 corpus identity + change detection. The DEFAULT backfills
-        # existing rows with an empty postings list.
-        conn.execute(text(
-            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
-            "postings JSONB NOT NULL DEFAULT '[]'::jsonb"))
-        conn.execute(text(
-            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS content_hash TEXT"))
-        conn.execute(text(
-            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
-            "content_changed_at TIMESTAMPTZ"))
-        # v2 agent event types. Postgres can't ALTER a CHECK in place, so
-        # drop and re-add it; both run in this one transaction, so no
-        # concurrent writer ever sees the table unconstrained. Re-running is
-        # harmless (the new set is a superset, so existing rows validate).
+    IF NOT EXISTS (or checks first) -- safe to run on every startup. (Whole
+    new tables need nothing here: create_all() creates missing tables.)
+
+    Runs under the migration advisory lock, in the caller's transaction if
+    one is passed (init_db does), else in its own."""
+    if conn is None:
+        with get_engine().begin() as own:
+            _run_migrations(own)
+        return
+    _take_migration_lock(conn)
+    conn.execute(text(
+        "ALTER TABLE events ADD COLUMN IF NOT EXISTS note TEXT"))
+    # v2 corpus identity + change detection. The DEFAULT backfills
+    # existing rows with an empty postings list.
+    conn.execute(text(
+        "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
+        "postings JSONB NOT NULL DEFAULT '[]'::jsonb"))
+    conn.execute(text(
+        "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS content_hash TEXT"))
+    conn.execute(text(
+        "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
+        "content_changed_at TIMESTAMPTZ"))
+    # v2 agent event types. Postgres can't ALTER a CHECK in place, so a
+    # stale constraint is dropped and re-added in this one transaction (no
+    # concurrent writer ever sees the table unconstrained; the new set is a
+    # superset, so existing rows validate). An up-to-date constraint is left
+    # alone: re-running never rewrites it (same pg_constraint oid).
+    if not event_type_check_is_current(_event_type_check_def(conn)):
         conn.execute(text(
             f"ALTER TABLE events DROP CONSTRAINT IF EXISTS {EVENT_TYPE_CHECK_NAME}"))
         conn.execute(text(
