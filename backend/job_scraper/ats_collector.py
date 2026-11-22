@@ -21,10 +21,21 @@ Where results go (save_collected_jobs):
   - database configured + reachable -> upsert into canonical_jobs
   - otherwise -> deduped merge into data/jobs.json
 
+Two ways to collect:
+  - collect_all_ats_jobs() (this CLI): a board that fails is printed and
+    skipped, as before.
+  - collect_sources() (the scheduled scan, services/scan.py): the same
+    fetchers with the same retry/backoff, but each source is isolated and a
+    failure is REPORTED -- {source, slug, error} -- instead of looking like
+    an empty board. No new sources: these three public ATS APIs only
+    (ADR-001 guardrail 3).
+
 Run (from project root, one level above backend/):
     python -m backend.job_scraper.ats_collector
 """
 import time
+from dataclasses import dataclass, field
+
 import requests
 
 from .job_parser import clean_job_description, extract_experience, detect_seniority
@@ -63,11 +74,18 @@ RETRY_BACKOFF_SECONDS = 1.5
 USER_AGENT = "Mozilla/5.0 (AI-Job-Agent/1.0; personal portfolio project)"
 
 
-def _get_with_retries(url, params=None):
-    """GET with small retry/backoff. Returns parsed JSON or None on failure.
-    Failures here are routine (company renamed token, board taken down,
-    transient network blip) — log and move on, never crash the whole run."""
+class SourceFetchError(RuntimeError):
+    """One ATS board could not be fetched or parsed (after the retries)."""
+
+
+def _fetch_json(url, params=None):
+    """GET with small retry/backoff; the parsed JSON, or SourceFetchError
+    describing the last failure. A 404 is not retried (bad/renamed company
+    token); other statuses (429, 5xx), network errors and unparseable
+    bodies are. A rate limit or block is backed off from and reported,
+    never worked around (ADR-001 guardrail 4)."""
     headers = {"User-Agent": USER_AGENT}
+    last = None
     for attempt in range(RETRY_COUNT + 1):
         try:
             resp = requests.get(url, headers=headers, params=params,
@@ -75,13 +93,42 @@ def _get_with_retries(url, params=None):
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 404:
-                return None          # bad/renamed company token — not worth retrying
-            # other statuses (429, 5xx) are worth a retry
-        except requests.RequestException:
-            pass
+                raise SourceFetchError(
+                    "HTTP 404 (board not found -- renamed or removed token?)")
+            last = f"HTTP {resp.status_code}"
+        except requests.RequestException as exc:   # incl. invalid JSON
+            last = f"{exc.__class__.__name__}: {exc}"
         if attempt < RETRY_COUNT:
             time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
-    return None
+    raise SourceFetchError(f"{last} (gave up after {RETRY_COUNT + 1} attempts)")
+
+
+def _get_with_retries(url, params=None):
+    """GET with small retry/backoff. Returns parsed JSON or None on failure.
+    Failures here are routine (company renamed token, board taken down,
+    transient network blip) — log and move on, never crash the whole run."""
+    try:
+        return _fetch_json(url, params)
+    except SourceFetchError:
+        return None
+
+
+def _board(label, slug, url, params=None, jobs_key="jobs", strict=False):
+    """A board's JSON, or None when it has nothing usable. strict=True
+    raises SourceFetchError instead, so the caller can report why."""
+    if not strict:
+        data = _get_with_retries(url, params=params)
+        if not data or (jobs_key and jobs_key not in data):
+            print(f"  [{label}] {slug}: no data / board not found")
+            return None
+        return data
+    data = _fetch_json(url, params)
+    if jobs_key and not (isinstance(data, dict)
+                         and isinstance(data.get(jobs_key), list)):
+        raise SourceFetchError(f"unexpected response: no {jobs_key!r} list")
+    if not jobs_key and not isinstance(data, list):
+        raise SourceFetchError("unexpected response: not a list of postings")
+    return data
 
 
 def _normalize(title, company, location, tags, description_html, apply_link,
@@ -112,11 +159,11 @@ def _normalize(title, company, location, tags, description_html, apply_link,
 # --------------------------------------------------------------------------
 # GREENHOUSE
 # --------------------------------------------------------------------------
-def fetch_greenhouse_jobs(company_token):
+def fetch_greenhouse_jobs(company_token, strict=False):
     url = f"https://boards-api.greenhouse.io/v1/boards/{company_token}/jobs"
-    data = _get_with_retries(url, params={"content": "true"})
-    if not data or "jobs" not in data:
-        print(f"  [greenhouse] {company_token}: no data / board not found")
+    data = _board("greenhouse", company_token, url, {"content": "true"},
+                  strict=strict)
+    if data is None:
         return []
 
     jobs = []
@@ -140,11 +187,11 @@ def fetch_greenhouse_jobs(company_token):
 # --------------------------------------------------------------------------
 # LEVER
 # --------------------------------------------------------------------------
-def fetch_lever_jobs(company_slug):
+def fetch_lever_jobs(company_slug, strict=False):
     url = f"https://api.lever.co/v0/postings/{company_slug}"
-    data = _get_with_retries(url, params={"mode": "json"})
-    if not data:
-        print(f"  [lever] {company_slug}: no data / board not found")
+    data = _board("lever", company_slug, url, {"mode": "json"}, jobs_key=None,
+                  strict=strict)
+    if data is None:
         return []
 
     jobs = []
@@ -170,11 +217,10 @@ def fetch_lever_jobs(company_slug):
 # --------------------------------------------------------------------------
 # ASHBY
 # --------------------------------------------------------------------------
-def fetch_ashby_jobs(job_board_name):
+def fetch_ashby_jobs(job_board_name, strict=False):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{job_board_name}"
-    data = _get_with_retries(url)
-    if not data or "jobs" not in data:
-        print(f"  [ashby] {job_board_name}: no data / board not found")
+    data = _board("ashby", job_board_name, url, strict=strict)
+    if data is None:
         return []
 
     jobs = []
@@ -218,6 +264,49 @@ def collect_all_ats_jobs():
 
     print(f"\nTotal raw jobs collected: {len(all_jobs)}")
     return all_jobs
+
+
+FETCHERS = {
+    "greenhouse": fetch_greenhouse_jobs,
+    "lever": fetch_lever_jobs,
+    "ashby": fetch_ashby_jobs,
+}
+
+
+def default_sources():
+    """Every configured (ats, slug) pair, read at call time."""
+    return ([("greenhouse", s) for s in GREENHOUSE_COMPANIES]
+            + [("lever", s) for s in LEVER_COMPANIES]
+            + [("ashby", s) for s in ASHBY_COMPANIES])
+
+
+@dataclass
+class Collection:
+    """What collect_sources() gathered, and from where."""
+    jobs: list = field(default_factory=list)
+    sources_ok: list = field(default_factory=list)      # [(ats, slug)]
+    sources_failed: list = field(default_factory=list)  # [{source, slug, error}]
+
+
+def collect_sources(sources=None):
+    """Fetch every source (default: default_sources()), isolating each one:
+    a source that raises -- network failure after the retries, a 404, an
+    unexpected payload, or a bug parsing it -- is recorded in
+    sources_failed and the rest still run. An empty board is a success."""
+    out = Collection()
+    for ats, slug in (default_sources() if sources is None else sources):
+        try:
+            jobs = FETCHERS[ats](slug, strict=True)
+        except Exception as exc:                            # noqa: BLE001
+            error = (str(exc) if isinstance(exc, SourceFetchError)
+                     else f"{exc.__class__.__name__}: {exc}")
+            print(f"  [{ats}] {slug}: FAILED -- {error}")
+            out.sources_failed.append({"source": ats, "slug": slug,
+                                       "error": error})
+            continue
+        out.sources_ok.append((ats, slug))
+        out.jobs.extend(jobs)
+    return out
 
 
 def merge_into_jobs_file(new_jobs, jobs_path=None):
