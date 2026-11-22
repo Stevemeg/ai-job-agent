@@ -91,25 +91,36 @@ CREATE INDEX IF NOT EXISTS idx_events_user_id ON events (user_id);
 CREATE INDEX IF NOT EXISTS idx_events_job_id ON events (job_id);
 CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type);
 
--- v2 durable task queue (ADR-001 §2). Schema only for now; the worker that
--- claims rows with SELECT ... FOR UPDATE SKIP LOCKED arrives in Phase 2.
--- Existing databases get this table from db.py:init_db() (create_all).
+-- v2 durable task queue (ADR-001 §2), written and claimed by
+-- backend/taskqueue (SELECT ... FOR UPDATE SKIP LOCKED) and run by the worker
+-- (python -m backend.worker). Existing databases get this table from
+-- db.py:init_db() (create_all) and its Phase 2 columns/index from
+-- db.py:_run_migrations().
 CREATE TABLE IF NOT EXISTS tasks (
     id                  BIGSERIAL PRIMARY KEY,
     kind                TEXT NOT NULL,                 -- e.g. "rank", "scan"
     payload             JSONB NOT NULL DEFAULT '{}',
     status              TEXT NOT NULL DEFAULT 'queued' CHECK (status IN (
                             'queued', 'running', 'succeeded', 'failed', 'dead')),
-    idempotency_key     TEXT UNIQUE,                   -- duplicate enqueue -> conflict, never a second run
-    attempts            INT NOT NULL DEFAULT 0,
+    idempotency_key     TEXT UNIQUE,                   -- duplicate enqueue returns the existing task, never a second run
+    concurrency_key     TEXT,                          -- at most one queued/running task per key (index below)
+    attempts            INT NOT NULL DEFAULT 0,        -- incremented at claim
     max_attempts        INT NOT NULL DEFAULT 3,
     run_after           TIMESTAMPTZ NOT NULL DEFAULT now(),
     lease_expires_at    TIMESTAMPTZ,                   -- worker lease; expired = reclaimable
-    locked_by           TEXT,
+    locked_by           TEXT,                          -- worker id holding (or last holding) the lease
     last_error          TEXT,
+    result              JSONB,                         -- handler result, set on success
+    started_at          TIMESTAMPTZ,                   -- latest claim
+    finished_at         TIMESTAMPTZ,                   -- succeeded / dead
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- The claim query's access path: "queued and due, oldest first".
 CREATE INDEX IF NOT EXISTS idx_tasks_status_run_after ON tasks (status, run_after);
+
+-- One active (queued or running) task per concurrency_key: a second enqueue
+-- with the same key fails while one is active (the API maps that to 409).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_concurrency_key_active
+    ON tasks (concurrency_key) WHERE status IN ('queued', 'running');

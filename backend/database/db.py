@@ -174,20 +174,30 @@ class Event(Base):
 
 
 TASK_STATUSES = ("queued", "running", "succeeded", "failed", "dead")
+# A concurrency_key is held while its task is in one of these states; the
+# partial unique index below allows at most one such task per key.
+TASK_ACTIVE_STATUSES = ("queued", "running")
+TASK_CONCURRENCY_INDEX = "uq_tasks_concurrency_key_active"
+
+
+def _task_active_predicate() -> str:
+    return "status IN (%s)" % ", ".join(f"'{s}'" for s in TASK_ACTIVE_STATUSES)
 
 
 class Task(Base):
-    """Durable work queue row (ADR-001 §2). Schema only in Phase 1 -- the
-    worker that claims rows (SELECT ... FOR UPDATE SKIP LOCKED) is Phase 2.
+    """Durable work queue row (ADR-001 §2), written and claimed by
+    backend/taskqueue (SELECT ... FOR UPDATE SKIP LOCKED).
 
-    updated_at is refreshed by the ORM on ORM updates; raw-SQL writers (the
-    future claim/heartbeat queries) must set it explicitly."""
+    updated_at is refreshed by the ORM on ORM updates; the queue's raw-SQL
+    writers (claim/heartbeat/complete/fail) set it explicitly."""
     __tablename__ = "tasks"
     __table_args__ = (
         CheckConstraint(
             "status IN (%s)" % ",".join(f"'{s}'" for s in TASK_STATUSES),
             name="tasks_status_check"),
         Index("idx_tasks_status_run_after", "status", "run_after"),
+        Index(TASK_CONCURRENCY_INDEX, "concurrency_key", unique=True,
+              postgresql_where=text(_task_active_predicate())),
     )
 
     id = Column(BigInteger, primary_key=True)            # BIGSERIAL
@@ -195,6 +205,9 @@ class Task(Base):
     payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     status = Column(Text, nullable=False, server_default=text("'queued'"))
     idempotency_key = Column(Text, unique=True)          # NULLs never collide
+    # At most one queued/running task per key (e.g. "rank:default"); NULL
+    # means unconstrained. Freed as soon as the task succeeds or dies.
+    concurrency_key = Column(Text)
     attempts = Column(Integer, nullable=False, server_default=text("0"))
     max_attempts = Column(Integer, nullable=False, server_default=text("3"))
     run_after = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -202,6 +215,9 @@ class Task(Base):
     lease_expires_at = Column(TIMESTAMP(timezone=True))
     locked_by = Column(Text)
     last_error = Column(Text)
+    result = Column(JSONB)                               # set on success
+    started_at = Column(TIMESTAMP(timezone=True))        # latest claim
+    finished_at = Column(TIMESTAMP(timezone=True))       # succeeded / dead
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -286,6 +302,15 @@ def _run_migrations(conn=None):
     conn.execute(text(
         "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
         "content_changed_at TIMESTAMPTZ"))
+    # v2 queue (Phase 2) columns on a Phase 1 tasks table. The partial
+    # unique index allows one queued/running task per concurrency_key; all
+    # pre-existing rows have a NULL key, so it builds without conflicts.
+    for column in ("concurrency_key TEXT", "result JSONB",
+                   "started_at TIMESTAMPTZ", "finished_at TIMESTAMPTZ"):
+        conn.execute(text(f"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS {column}"))
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {TASK_CONCURRENCY_INDEX} "
+        f"ON tasks (concurrency_key) WHERE {_task_active_predicate()}"))
     # v2 agent event types. Postgres can't ALTER a CHECK in place, so a
     # stale constraint is dropped and re-added in this one transaction (no
     # concurrent writer ever sees the table unconstrained; the new set is a

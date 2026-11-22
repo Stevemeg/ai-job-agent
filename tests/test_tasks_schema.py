@@ -1,4 +1,4 @@
-"""tasks table: schema-level guarantees the Phase 2 worker will rely on."""
+"""tasks table: schema-level guarantees the queue and worker rely on."""
 import pytest
 
 pytest.importorskip("sqlalchemy")
@@ -11,15 +11,19 @@ from backend.database import db                   # noqa: E402
 pytestmark = pytest.mark.db
 
 
-def _enqueue(engine, kind="rank", key=None, status=None):
+def _enqueue(engine, kind="rank", key=None, status=None, ckey=None):
     cols, vals = ["kind", "idempotency_key"], [":kind", ":key"]
     if status is not None:
         cols.append("status")
         vals.append(":status")
+    if ckey is not None:
+        cols.append("concurrency_key")
+        vals.append(":ckey")
     with engine.begin() as conn:
         return conn.execute(text(
             f"INSERT INTO tasks ({', '.join(cols)}) VALUES ({', '.join(vals)}) "
-            "RETURNING id"), {"kind": kind, "key": key, "status": status}).scalar()
+            "RETURNING id"), {"kind": kind, "key": key, "status": status,
+                              "ckey": ckey}).scalar()
 
 
 def test_idempotency_key_uniqueness_enforced(pg):
@@ -64,3 +68,23 @@ def test_claim_index_exists(pg):
             "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
             "AND indexname = 'idx_tasks_status_run_after'")).scalar()
     assert indexdef and "(status, run_after)" in indexdef
+
+
+def test_concurrency_key_allows_one_active_task(pg):
+    db.init_db()
+    _enqueue(pg, ckey="rank:default")                       # queued
+    with pytest.raises(IntegrityError):
+        _enqueue(pg, ckey="rank:default")
+    with pytest.raises(IntegrityError):
+        _enqueue(pg, ckey="rank:default", status="running")
+    # terminal tasks don't hold the key; other keys and NULL are independent
+    _enqueue(pg, ckey="rank:default", status="succeeded")
+    _enqueue(pg, ckey="rank:default", status="dead")
+    _enqueue(pg, ckey="scan:default")
+    _enqueue(pg)
+    _enqueue(pg)
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE tasks SET status = 'succeeded' "
+                          "WHERE concurrency_key = 'rank:default' "
+                          "AND status = 'queued'"))
+    _enqueue(pg, ckey="rank:default")                       # free again

@@ -118,6 +118,13 @@ _INDEXES_SQL = """
 SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()
 ORDER BY indexname
 """
+# Full definitions (incl. the partial-index WHERE) for the v2 tasks table,
+# which must match exactly between schema.sql and the ORM.
+_TASK_INDEXDEFS_SQL = """
+SELECT indexname, indexdef FROM pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'tasks'
+ORDER BY indexname
+"""
 
 # Known v1 drift that pre-dates v2 and is harmless in Postgres: the v1 models
 # use String (VARCHAR without length == TEXT) where schema.sql says TEXT, and
@@ -149,6 +156,7 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     with pg.connect() as conn:
         from_sql = conn.execute(text(_COLUMNS_SQL)).all()
         idx_from_sql = conn.execute(text(_INDEXES_SQL)).scalars().all()
+        task_idx_from_sql = conn.execute(text(_TASK_INDEXDEFS_SQL)).all()
 
     # schema.sql-built databases must also survive migrations untouched
     _run_init_twice(monkeypatch)
@@ -162,6 +170,7 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     with pg.connect() as conn:
         from_orm = conn.execute(text(_COLUMNS_SQL)).all()
         idx_from_orm = conn.execute(text(_INDEXES_SQL)).scalars().all()
+        task_idx_from_orm = conn.execute(text(_TASK_INDEXDEFS_SQL)).all()
 
     assert _normalized(from_orm) == _normalized(from_sql)
     # ORM-only extras would be fine, but every schema.sql index must exist
@@ -169,6 +178,45 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     assert set(idx_from_sql) - set(idx_from_orm) <= {
         "idx_canonical_jobs_company_title", "idx_events_user_id",
         "idx_events_job_id", "idx_events_event_type"}
+    assert task_idx_from_orm == task_idx_from_sql
+    assert db.TASK_CONCURRENCY_INDEX in dict(task_idx_from_sql)
+
+
+# The tasks table exactly as Phase 1 shipped it (before the queue columns).
+PHASE1_TASKS = """
+CREATE TABLE tasks (
+    id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN (
+        'queued', 'running', 'succeeded', 'failed', 'dead')),
+    idempotency_key TEXT UNIQUE,
+    attempts INT NOT NULL DEFAULT 0, max_attempts INT NOT NULL DEFAULT 3,
+    run_after TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_expires_at TIMESTAMPTZ, locked_by TEXT, last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX idx_tasks_status_run_after ON tasks (status, run_after);
+INSERT INTO tasks (kind) VALUES ('rank'), ('rank');
+"""
+
+
+def test_phase1_tasks_table_gains_queue_columns_and_index(pg, monkeypatch):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(OLD_SCHEMA + PHASE1_TASKS)
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        cols = set(conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'tasks'"
+        )).scalars())
+        indexdef = conn.execute(text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = :n"), {"n": db.TASK_CONCURRENCY_INDEX}).scalar()
+        rows = conn.execute(text(
+            "SELECT kind, concurrency_key, result FROM tasks ORDER BY id")).all()
+    assert {"concurrency_key", "result", "started_at", "finished_at"} <= cols
+    assert indexdef and "UNIQUE" in indexdef and "WHERE" in indexdef
+    assert rows == [("rank", None, None), ("rank", None, None)]   # kept
 
 
 def _event_check_oid(engine):
