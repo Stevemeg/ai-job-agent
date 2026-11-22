@@ -22,7 +22,7 @@ v2 turns the request-driven v1 pipeline into a durable, scheduled agent. It has 
 
 - **Plan and acceptance criteria:** [V2_PLAN.md](V2_PLAN.md), phases 0–7
 - **Architecture and guardrails:** [ADR-001](adr/ADR-001-v2-always-on-architecture.md)
-- **Branch:** `v2-always-on` · **Current phase:** 0 (baseline) ✅
+- **Branch:** `v2-always-on` · **Current phase:** 1 (data layer), in review
 
 ## 📋 Planned — v1.1
 
@@ -38,7 +38,7 @@ v2 turns the request-driven v1 pipeline into a durable, scheduled agent. It has 
 - **Learning-to-rank** — replace hand-tuned weights (0.40/0.30/0.20/0.10) with a model trained on outcome events; needs ~50+ real outcomes; events schema was designed for this from day one
 - **Multi-domain taxonomies** — skill databases + role archetypes for mechanical/civil/electrical/HR/marketing/finance (architecture is data-driven; this is content work, not code work)
 - **Multi-user SaaS** — profiles to Postgres, auth, per-user ranking caches, precomputed corpus embeddings
-- **Auto-apply agent** — browser agent fills ATS forms with tailored documents behind a mandatory human-review gate
+- ~~**Auto-apply agent** — browser agent fills ATS forms with tailored documents behind a mandatory human-review gate~~ — **superseded by v2**: the agent never submits applications (approval gate + Gmail drafts only; see [ADR-001](adr/ADR-001-v2-always-on-architecture.md))
 
 ## Long-Term Vision
 

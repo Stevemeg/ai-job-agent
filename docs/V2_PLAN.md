@@ -14,7 +14,7 @@ on `main` @ `e5cb0df`), and each phase adds tests for what it introduces.
 | # | Phase | Acceptance criteria (one line) | Status |
 |---|---|---|---|
 | 0 | Baseline | `v2-always-on` branched from `main`, pytest baseline recorded (71 passed), ADR-001 and this plan committed, and no files under `backend/` or `tests/` changed. | ✅ Done |
-| 1 | Data layer | Collectors upsert into `canonical_jobs` (no duplicate rows on re-run), ranking reads the corpus from Postgres with the JSON fallback intact, and the `tasks` table plus new event types arrive through idempotent migrations. | ⏳ |
+| 1 | Data layer | Collectors upsert into `canonical_jobs` (no duplicate rows on re-run), ranking reads the corpus from Postgres with the JSON fallback intact, and the `tasks` table plus new event types arrive through idempotent migrations. | 🔄 In review |
 | 2 | Durable worker | Ranking runs as a Postgres-queued task claimed via `SKIP LOCKED`; a worker killed mid-run is retried to exactly one completion, and `rankings.py` has no in-memory `_state`/thread while the `/v1/rankings` contract is unchanged. | ⏳ |
 | 3 | Scheduled incremental scan | APScheduler (SQLAlchemy job store, `Asia/Kolkata`) enqueues scans on schedule, a restart produces no duplicate or burst runs, and only jobs new or changed since the last scan are re-embedded and re-ranked. | ⏳ |
 | 4 | Agent graph dry-run | The LangGraph graph (scan → rank → shortlist → generate → validate → approval) runs end to end with the Postgres checkpointer and **zero side effects**, and a run killed mid-graph resumes from its last checkpoint. | ⏳ |
