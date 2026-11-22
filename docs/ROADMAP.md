@@ -16,6 +16,14 @@
 
 - **Outcome logging at scale** — applying to ranked jobs and logging results via `log_outcome_cli`; this is the prerequisite for everything in "learning" below
 
+## 🚧 v2 (in progress) — "Always-On Agent"
+
+v2 turns the request-driven v1 pipeline into a durable, scheduled agent. It has a LangGraph graph with a Postgres checkpointer, a Postgres-backed task queue, APScheduler scans (`Asia/Kolkata`), and the corpus in `canonical_jobs`. It also has a human approval gate via `interrupt()`, and approval decisions are logged as events automatically, which replaces manual outcome logging for anything the agent surfaces. v2 **never submits applications** (it writes Gmail drafts only), so it replaces the "Auto-apply agent" idea under *Future* below.
+
+- **Plan and acceptance criteria:** [V2_PLAN.md](V2_PLAN.md), phases 0–7
+- **Architecture and guardrails:** [ADR-001](adr/ADR-001-v2-always-on-architecture.md)
+- **Branch:** `v2-always-on` · **Current phase:** 0 (baseline) ✅
+
 ## 📋 Planned — v1.1
 
 1. ~~**Test suite**~~ — ✅ done: 49 pytest cases (analysis, validator, tracker, taxonomy, regressions) wired into CI. Still to grow: parser tests over diverse resume fixtures, matcher integration tests
