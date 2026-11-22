@@ -9,21 +9,29 @@ the tracker's view of the world from the append-only events log:
   telemetry, not tracking.
 - A job's STATUS is derived, not stored: the furthest pipeline stage
   reached -- unless the most recent deliberate event is terminal
-  (rejected/dismiss), which overrides. This means status never needs
-  migration and is always consistent with history.
+  (rejected/dismiss/declined), which overrides. This means status never
+  needs migration and is always consistent with history.
+- v2 agent events (approved/declined/drafted) are deliberate decisions, so
+  they put a job on the board and show on its timeline. "drafted" is
+  timeline-only: a Gmail draft existing says nothing about where the
+  application stands, so it never changes status.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from .db import get_session, CanonicalJob, Event, User
+from .db import get_session, CanonicalJob, Event, User, AGENT_EVENT_TYPES
 
 # Deliberate events only -- impressions/clicks don't put a job on the board.
-TRACKED_TYPES = ("save", "applied", "interview", "rejected", "offer", "dismiss")
+TRACKED_TYPES = ("save", "applied", "interview", "rejected", "offer",
+                 "dismiss") + AGENT_EVENT_TYPES
 
-# Pipeline progression for status derivation.
-STAGE_ORDER = {"save": 1, "applied": 2, "interview": 3, "offer": 4}
-TERMINAL = {"rejected", "dismiss"}
+# Pipeline progression for status derivation. "approved" sits between save
+# and applied: the packet is ready, but the human still submits (ADR-001).
+STAGE_ORDER = {"save": 1, "approved": 2, "applied": 3, "interview": 4,
+               "offer": 5}
+TERMINAL = {"rejected", "dismiss", "declined"}
+TIMELINE_ONLY = {"drafted"}
 
 
 def get_or_create_user(email: str, display_name: str = "") -> int:
@@ -39,7 +47,8 @@ def get_or_create_user(email: str, display_name: str = "") -> int:
 
 def derive_status(event_types_newest_first: list[str]) -> str:
     """Furthest stage reached, unless the newest deliberate event is terminal."""
-    deliberate = [e for e in event_types_newest_first if e in TRACKED_TYPES]
+    deliberate = [e for e in event_types_newest_first
+                  if e in TRACKED_TYPES and e not in TIMELINE_ONLY]
     if not deliberate:
         return "save"
     if deliberate[0] in TERMINAL:
@@ -93,8 +102,8 @@ def get_tracked_jobs(user_id: int) -> list[dict[str, Any]]:
 
 def get_funnel_counts(tracked: list[dict]) -> dict[str, int]:
     """Pipeline counts from an already-fetched tracked list (pure)."""
-    counts = {"save": 0, "applied": 0, "interview": 0, "offer": 0,
-              "rejected": 0, "dismiss": 0}
+    counts = {"save": 0, "approved": 0, "applied": 0, "interview": 0,
+              "offer": 0, "rejected": 0, "dismiss": 0, "declined": 0}
     for t in tracked:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     return counts

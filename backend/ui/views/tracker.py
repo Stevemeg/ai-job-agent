@@ -17,13 +17,23 @@ from .. import theme
 
 STATUS_META = {
     "save":      ("Saved", ""),
+    "approved":  ("Approved", ""),          # v2 agent: packet ready, human submits
     "applied":   ("Applied", "amber"),
     "interview": ("Interview", "green"),
     "offer":     ("Offer 🎉", "green"),
     "rejected":  ("Rejected", "red"),
     "dismiss":   ("Dismissed", "gray"),
+    "declined":  ("Declined", "gray"),      # v2 agent: suggestion declined
 }
+# Manual entry only. The v2 agent types (approved/declined/drafted) are
+# logged automatically by the approval gate and deliberately absent here.
 LOGGABLE = ["save", "applied", "interview", "rejected", "offer", "dismiss"]
+HIDDEN_BY_DEFAULT = ("dismiss", "declined")
+
+
+def _status_meta(status: str) -> tuple[str, str]:
+    # Never KeyError on a status this view doesn't know yet.
+    return STATUS_META.get(status, (status.title(), ""))
 
 
 def _db_available() -> tuple[bool, str]:
@@ -56,13 +66,13 @@ def render(profile: dict) -> None:
 
     # ---- funnel summary ------------------------------------------------------
     counts = get_funnel_counts(tracked)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    for col, key, label in [(c1, "save", "Saved"), (c2, "applied", "Applied"),
-                            (c3, "interview", "Interviews"),
-                            (c4, "offer", "Offers"), (c5, "rejected", "Rejected")]:
+    funnel = [("save", "Saved"), ("approved", "Approved"),
+              ("applied", "Applied"), ("interview", "Interviews"),
+              ("offer", "Offers"), ("rejected", "Rejected")]
+    for col, (key, label) in zip(st.columns(len(funnel)), funnel):
         with col:
             theme.card(f'<span class="uja-metric" style="font-size:1.6rem;">'
-                       f'{counts[key]}</span><br>'
+                       f'{counts.get(key, 0)}</span><br>'
                        f'<span class="uja-muted">{label}</span>')
 
     # ---- log an event --------------------------------------------------------
@@ -112,13 +122,13 @@ def render(profile: dict) -> None:
         return
 
     # ---- board ---------------------------------------------------------------
-    active = [t for t in tracked if t["status"] not in ("dismiss",)]
-    show_dismissed = st.toggle("Show dismissed", value=False)
+    active = [t for t in tracked if t["status"] not in HIDDEN_BY_DEFAULT]
+    show_dismissed = st.toggle("Show dismissed / declined", value=False)
     if show_dismissed:
         active = tracked
 
     for t in active:
-        label, variant = STATUS_META[t["status"]]
+        label, variant = _status_meta(t["status"])
         score = (f' · match {t["match_score"]:.0f}' if t["match_score"] else "")
         st.markdown('<div class="uja-card">', unsafe_allow_html=True)
         head_l, head_r = st.columns([4, 1])

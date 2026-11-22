@@ -50,7 +50,14 @@ CREATE TABLE IF NOT EXISTS events (
                         'applied',      -- user applied (manual)
                         'interview',    -- got an interview (manual)
                         'rejected',     -- rejected (manual)
-                        'offer'         -- received an offer (manual)
+                        'offer',        -- received an offer (manual)
+                        -- v2 agent decisions (ADR-001): auto-logged when the
+                        -- approval gate resolves, never entered by hand.
+                        -- Existing databases get these via the constraint
+                        -- rewrite in db.py:_run_migrations().
+                        'approved',     -- user approved the agent's application packet
+                        'declined',     -- user declined the agent's suggestion
+                        'drafted'       -- agent created a Gmail draft (never sent)
                     )),
 
     -- Snapshot of the score AT THE TIME of the event. Scoring weights will

@@ -124,19 +124,31 @@ class CanonicalJob(Base):
         return " ".join((title or "").lower().split())
 
 
-VALID_EVENT_TYPES = (
+# v1 event types: auto-logged telemetry plus what a person logs by hand.
+CORE_EVENT_TYPES = (
     "impression", "click", "save", "dismiss",
     "applied", "interview", "rejected", "offer",
 )
+# v2 agent decisions (ADR-001). Written automatically when the approval gate
+# resolves; never offered for manual entry (CLI, tracker form, or the
+# POST /v1/tracker/events schema).
+AGENT_EVENT_TYPES = ("approved", "declined", "drafted")
+
+VALID_EVENT_TYPES = CORE_EVENT_TYPES + AGENT_EVENT_TYPES
+
+EVENT_TYPE_CHECK_NAME = "events_event_type_check"
+
+
+def event_type_check_sql() -> str:
+    """The CHECK body for events.event_type -- single source for the ORM
+    constraint and the migration that rewrites it on existing databases."""
+    return "event_type IN (%s)" % ",".join(f"'{t}'" for t in VALID_EVENT_TYPES)
 
 
 class Event(Base):
     __tablename__ = "events"
     __table_args__ = (
-        CheckConstraint(
-            "event_type IN ('impression','click','save','dismiss','applied','interview','rejected','offer')",
-            name="events_event_type_check",
-        ),
+        CheckConstraint(event_type_check_sql(), name=EVENT_TYPE_CHECK_NAME),
     )
 
     id = Column(Integer, primary_key=True)
@@ -177,3 +189,12 @@ def _run_migrations():
     with get_engine().begin() as conn:
         conn.execute(text(
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS note TEXT"))
+        # v2 agent event types. Postgres can't ALTER a CHECK in place, so
+        # drop and re-add it; both run in this one transaction, so no
+        # concurrent writer ever sees the table unconstrained. Re-running is
+        # harmless (the new set is a superset, so existing rows validate).
+        conn.execute(text(
+            f"ALTER TABLE events DROP CONSTRAINT IF EXISTS {EVENT_TYPE_CHECK_NAME}"))
+        conn.execute(text(
+            f"ALTER TABLE events ADD CONSTRAINT {EVENT_TYPE_CHECK_NAME} "
+            f"CHECK ({event_type_check_sql()})"))
