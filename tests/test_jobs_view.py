@@ -51,7 +51,7 @@ def page(tmp_path, monkeypatch, profile, jobs_view):
     return ranked_file
 
 
-def _ranked(n=12):            # the view needs >= 10 (its "Show top N" minimum)
+def _ranked(n=12):
     return [{"title": f"AI Engineer {i}", "company": "acme", "location": None,
              "match_score": 80.0, "score_breakdown": {"skill_overlap": 0.5},
              "strong_matches": [], "missing_skills": [], "apply_link": None}
@@ -122,3 +122,15 @@ def test_queue_mode_enqueues_and_shows_status_without_ranking_inline(
     monkeypatch.setattr(ranking, "request_ranking", busy)
     at = next(b for b in at.button if b.label == "Rank jobs now").click().run()
     assert any("already in progress" in i.value for i in at.info)
+
+
+@pytest.mark.parametrize("n_ranked", [0, 3, 9, 10, 45])
+def test_show_top_n_works_for_any_number_of_ranked_jobs(page, n_ranked):
+    """Fewer than 10 ranked jobs used to crash the page: "Show top N" had a
+    fixed minimum of 10, above its maximum of len(ranked)."""
+    page.write_text(json.dumps(_ranked(n_ranked)), encoding="utf-8")
+    at = _app().run()
+    assert not at.exception
+    top_n = next(n for n in at.number_input if n.label == "Show top N")
+    assert top_n.value == min(30, n_ranked)
+    assert any(f"of {n_ranked:,} ranked jobs" in m.value for m in at.markdown)

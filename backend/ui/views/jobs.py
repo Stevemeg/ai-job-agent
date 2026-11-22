@@ -129,6 +129,17 @@ def _queue_status_panel() -> None:
             st.error(f"Ranking failed: {status['detail']}")
 
 
+def _top_n_input(n_ranked: int) -> int:
+    """The "Show top N" picker: steps of 10, from 10 up to every ranked job.
+    With fewer than 10 ranked jobs (the sample corpus after the gates, or a
+    small DB corpus) that range would be empty -- min 10 > max n, which
+    Streamlit rejects -- so it becomes 1..n in steps of 1 (0..0 when no job
+    passed the gates)."""
+    if n_ranked >= 10:
+        return st.number_input("Show top N", 10, n_ranked, min(30, n_ranked), 10)
+    return st.number_input("Show top N", min(1, n_ranked), n_ranked, n_ranked, 1)
+
+
 def render(profile: dict) -> None:
     corpus = load_corpus_snapshot()      # DB -> jobs.json -> sample (cached)
     has_corpus = corpus.source != "none"
@@ -170,8 +181,7 @@ def render(profile: dict) -> None:
     with f3:
         search = st.text_input("Search title")
     with f4:
-        top_n = st.number_input("Show top N", 10, len(ranked),
-                                min(30, len(ranked)), 10)
+        top_n = _top_n_input(len(ranked))
     if st.button("Re-rank against current resume"):
         _request_rerank(profile)
 
