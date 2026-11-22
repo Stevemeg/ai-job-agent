@@ -117,6 +117,16 @@ class CanonicalJob(Base):
     source = Column(String)
     first_seen_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     last_seen_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    # v2 identity + change detection (written by database/corpus.py):
+    # every ATS posting behind this canonical job, as
+    # [{source, posting_id, location, apply_link}], deduped on
+    # (source, posting_id); UNIQUE(company, normalized_title) is unchanged.
+    postings = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # sha256 over normalized title + description + location set. NULL marks a
+    # stub row (created by impression/outcome logging, never collected), which
+    # is why the corpus loader only reads rows where this is set.
+    content_hash = Column(Text)
+    content_changed_at = Column(TIMESTAMP(timezone=True))
 
     events = relationship("Event", back_populates="job")
 
@@ -225,6 +235,16 @@ def _run_migrations():
     with get_engine().begin() as conn:
         conn.execute(text(
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS note TEXT"))
+        # v2 corpus identity + change detection. The DEFAULT backfills
+        # existing rows with an empty postings list.
+        conn.execute(text(
+            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
+            "postings JSONB NOT NULL DEFAULT '[]'::jsonb"))
+        conn.execute(text(
+            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS content_hash TEXT"))
+        conn.execute(text(
+            "ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS "
+            "content_changed_at TIMESTAMPTZ"))
         # v2 agent event types. Postgres can't ALTER a CHECK in place, so
         # drop and re-add it; both run in this one transaction, so no
         # concurrent writer ever sees the table unconstrained. Re-running is

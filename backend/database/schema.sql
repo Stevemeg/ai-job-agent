@@ -27,8 +27,19 @@ CREATE TABLE IF NOT EXISTS canonical_jobs (
     clean_description   TEXT,
     apply_link          TEXT,
     source              TEXT,            -- "remoteok" | "ats" | etc, provenance
-    first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now(),   -- set on insert only
+    last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),   -- bumped on every sighting
+
+    -- v2 identity + change detection (written by database/corpus.py;
+    -- existing databases get these via db.py:_run_migrations()).
+    -- Every ATS posting behind this job: [{source, posting_id, location,
+    -- apply_link}], merged on upsert and deduped on (source, posting_id).
+    -- The same title in two locations stays ONE row with two postings.
+    postings            JSONB NOT NULL DEFAULT '[]',
+    -- sha256(normalized title + description + location set). NULL = stub
+    -- row from impression/outcome logging, never collected -> not corpus.
+    content_hash        TEXT,
+    content_changed_at  TIMESTAMPTZ,                          -- moves only when content_hash does
 
     UNIQUE (company, normalized_title)
 );

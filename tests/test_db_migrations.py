@@ -85,7 +85,7 @@ def test_old_constraint_upgraded_idempotently(pg, monkeypatch):
     assert checks == [db.EVENT_TYPE_CHECK_NAME]
 
 
-def test_old_database_gains_note_column_and_tasks_table(pg, monkeypatch):
+def test_old_database_gains_v2_columns_and_tasks_table(pg, monkeypatch):
     with pg.begin() as conn:
         conn.exec_driver_sql(OLD_SCHEMA)
     _run_init_twice(monkeypatch)
@@ -96,8 +96,14 @@ def test_old_database_gains_note_column_and_tasks_table(pg, monkeypatch):
             "AND table_name = 'events' AND column_name = 'note'")).scalar()
         tasks_exists = conn.execute(text(
             "SELECT to_regclass('tasks') IS NOT NULL")).scalar()
+        row = conn.execute(text(
+            "SELECT postings, content_hash, content_changed_at, first_seen_at "
+            "FROM canonical_jobs WHERE id = 1")).one()
     assert note_col == 1
     assert tasks_exists
+    assert row.postings == []                 # backfilled by the column default
+    assert row.content_hash is None and row.content_changed_at is None
+    assert row.first_seen_at is not None      # pre-existing data untouched
 
 
 SCHEMA_SQL = Path(__file__).resolve().parents[1] / "backend" / "database" / "schema.sql"
