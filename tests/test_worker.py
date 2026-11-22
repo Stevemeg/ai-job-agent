@@ -13,10 +13,9 @@ import pytest
 pytest.importorskip("sqlalchemy")
 
 from backend.database import corpus               # noqa: E402
-from backend.database.corpus import CorpusSnapshot, CorpusUnavailable  # noqa: E402
+from backend.database.corpus import CorpusUnavailable  # noqa: E402
 from backend.services import ranking               # noqa: E402
-from backend.worker import (EXIT_NO_DB, LeaseLost, TaskContext, Worker,  # noqa: E402
-                            make_worker_id)
+from backend.worker import EXIT_NO_DB, Worker, make_worker_id  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,59 +64,7 @@ def test_default_registry_is_keyed_by_task_kind():
     assert Worker().kinds == [ranking.RANK_KIND]
 
 
-# ---- the "rank" handler ---------------------------------------------------------------
-
-@pytest.fixture
-def rank_env(tmp_path, monkeypatch, profile):
-    profile_file = tmp_path / "candidate_profile.json"
-    profile_file.write_text(json.dumps(profile), encoding="utf-8")
-    ranked_file = tmp_path / "ranked_jobs.json"
-    monkeypatch.setattr(ranking, "PROFILE_FILE", profile_file)
-    monkeypatch.setattr(ranking, "RANKED_FILE", ranked_file)
-    calls = []
-
-    def fake_snapshot(*args, **kwargs):
-        calls.append(kwargs)
-        return CorpusSnapshot(jobs=[{"title": "A"}, {"title": "B"}], source="db",
-                              version=("db", 2, "2026-11-22T10:00:00+00:00"))
-
-    monkeypatch.setattr(ranking, "load_corpus_snapshot", fake_snapshot)
-    monkeypatch.setattr(ranking, "_rank_jobs", lambda p, jobs: [
-        {"title": j["title"], "match_score": 50.0} for j in jobs])
-    return ranked_file, calls
-
-
-def test_rank_handler_uses_the_strict_corpus_and_writes_atomically(rank_env):
-    ranked_file, calls = rank_env
-    result = ranking.run_rank_task({})
-    assert calls == [{"require_db": True}]
-    from backend.version import FORMULA_VERSION
-    assert result == {"ranked_count": 2,
-                      "corpus_version": "db:2:2026-11-22T10:00:00+00:00",
-                      "formula_version": FORMULA_VERSION}
-    assert json.loads(ranked_file.read_text(encoding="utf-8"))[0]["title"] == "A"
-    assert [p.name for p in ranked_file.parent.iterdir()
-            if p.name.endswith(".tmp")] == []
-
-
-def test_rank_handler_is_safe_to_rerun(rank_env):
-    ranked_file, _ = rank_env
-    first = ranking.run_rank_task({})
-    content = ranked_file.read_bytes()
-    assert ranking.run_rank_task({}) == first
-    assert ranked_file.read_bytes() == content
-
-
-def test_rank_handler_never_writes_after_losing_its_lease(rank_env):
-    from backend.taskqueue import ClaimedTask
-    ranked_file, _ = rank_env
-    ctx = TaskContext(task=ClaimedTask(1, "rank", {}, 1, 3, "w", None),
-                      worker_id="w", lease_lost=threading.Event())
-    ctx.lease_lost.set()
-    with pytest.raises(LeaseLost):
-        ranking.run_rank_task({}, ctx)
-    assert not ranked_file.exists()
-
+# ---- the "rank" handler (no DB; the DB-backed tests are in test_rank_lock_db.py) --
 
 def test_rank_handler_without_a_db_raises_instead_of_ranking_json(
         tmp_path, monkeypatch, profile):
@@ -130,13 +77,14 @@ def test_rank_handler_without_a_db_raises_instead_of_ranking_json(
     profile_file.write_text(json.dumps(profile), encoding="utf-8")
     monkeypatch.setattr(ranking, "PROFILE_FILE", profile_file)
     monkeypatch.setattr(ranking, "RANKED_FILE", tmp_path / "ranked.json")
-    monkeypatch.setattr(ranking, "_rank_jobs", lambda p, j: pytest.fail("ranked"))
-    with pytest.raises(CorpusUnavailable):
+    monkeypatch.setattr(ranking, "_make_scorer", lambda p: pytest.fail("scored"))
+    with pytest.raises(CorpusUnavailable) as err:
         ranking.run_rank_task({})
+    assert err.value.reason == "not_configured"
     assert not (tmp_path / "ranked.json").exists()
 
 
-def test_rank_handler_needs_a_profile(rank_env, monkeypatch, tmp_path):
+def test_rank_handler_needs_a_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(ranking, "PROFILE_FILE", tmp_path / "missing.json")
     with pytest.raises(FileNotFoundError):
         ranking.run_rank_task({})

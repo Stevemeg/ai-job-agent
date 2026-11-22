@@ -1,6 +1,7 @@
 """/v1/rankings on the task queue, end to end against a real Postgres:
-POST enqueues, the worker runs the task, /status maps it. rank_jobs is
-stubbed (no torch in CI); everything else is the production path."""
+POST enqueues, the worker runs the task, /status maps it. The per-job
+scorer is stubbed (no torch in CI); everything else -- incremental scoring,
+the rank lock, assembly -- is the production path."""
 import json
 
 import pytest
@@ -17,6 +18,7 @@ from backend.api.app import app                    # noqa: E402
 from backend.api.routers import rankings as rankings_router  # noqa: E402
 from backend.database import corpus                # noqa: E402
 from backend.services import ranking               # noqa: E402
+from backend.services.scoring import Scored         # noqa: E402
 from backend.version import FORMULA_VERSION        # noqa: E402
 from backend.worker import Worker                  # noqa: E402
 
@@ -29,14 +31,15 @@ def _job(title):
             "apply_link": "https://x/apply", "source": "ats"}
 
 
-def _fake_rank(profile, jobs):
-    return [{"title": j["title"], "company": j["company"],
-             "location": j.get("location"), "match_score": 90.0 - i,
-             "score_breakdown": {"skill_overlap": 0.5, "semantic": 0.5,
-                                 "role": 1.0, "seniority": 1.0},
-             "strong_matches": [], "likely_matches": [], "missing_skills": [],
-             "apply_link": j.get("apply_link")}
-            for i, j in enumerate(jobs)]
+def _fake_scorer(profile):
+    def score(job):                        # "AI Engineer <i>" scores 90 - i
+        i = int(job["title"].rsplit(" ", 1)[1])
+        return Scored(True, 90.0 - i,
+                      {"skill_overlap": 0.5, "semantic": 0.5, "role": 1.0,
+                       "seniority": 1.0},
+                      {"strong_matches": [], "likely_matches": [],
+                       "missing_skills": []})
+    return score
 
 
 @pytest.fixture
@@ -49,7 +52,7 @@ def api(pg, tmp_path, monkeypatch, profile):
             (rankings_router, "RANKED_FILE", ranked_file),
             (ranking, "PROFILE_FILE", profile_file),
             (ranking, "RANKED_FILE", ranked_file),
-            (ranking, "_rank_jobs", _fake_rank)]:
+            (ranking, "_make_scorer", _fake_scorer)]:
         monkeypatch.setattr(module, attr, value)
     return TestClient(app), ranked_file
 
@@ -116,10 +119,10 @@ def test_failing_rank_task_shows_retrying_then_failed(api, pg, monkeypatch):
     c, ranked_file = api
     _seed()
 
-    def broken(profile, jobs):
+    def broken(profile):
         raise RuntimeError("embedding model unavailable")
 
-    monkeypatch.setattr(ranking, "_rank_jobs", broken)
+    monkeypatch.setattr(ranking, "_make_scorer", broken)
     assert c.post("/v1/rankings").status_code == 202
     worker = _worker()
     assert worker.run_once().outcome == "failed"
