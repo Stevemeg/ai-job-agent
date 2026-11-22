@@ -128,3 +128,19 @@ def test_event_validation_rejects_bad_type(client):
     r = c.post("/v1/tracker/events", json={
         "company": "X", "title": "Y", "event_type": "ghosted"})
     assert r.status_code == 422        # schema rejects before touching the DB
+
+
+def test_start_ranking_without_a_db_is_503(client):
+    """No database configured (conftest strips it): there is no queue to
+    run on, so POST refuses clearly instead of ranking in-process."""
+    c, tmp = client
+    r = c.post("/v1/rankings")
+    assert r.status_code == 503
+    assert "DATABASE_URL" in r.json()["detail"]
+    assert not (tmp / "ranked_jobs.json").exists()
+
+
+def test_ranking_status_without_a_db_or_previous_run_is_idle(client):
+    c, _ = client
+    assert c.get("/v1/rankings/status").json() == {
+        "state": "idle", "detail": "", "ranked_count": None}
