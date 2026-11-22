@@ -34,7 +34,7 @@ The system runs entirely on the user's machine by design — resume data is sens
 | Python 3.11 + venv | Always | Everything |
 | Streamlit | `streamlit run backend/ui/app.py` | UI |
 | Ollama + Mistral | `ollama serve` | Tailoring, cover letters |
-| PostgreSQL 16 | Docker Compose | Outcome logging; the task queue + worker (queued ranking) |
+| PostgreSQL 16 | Docker Compose | Outcome logging; the task queue + worker (queued ranking and scans); the scheduler's job store |
 | Node.js ≥ 18 | Invoked by Python | `.docx` generation |
 
 ### Postgres
@@ -60,7 +60,7 @@ docker compose exec api python -m backend.database.corpus import data/sample_job
 #   (or data/jobs.json after running the collector)
 ```
 
-One shared image serves the API, UI and **worker** (same engines, different command). Design notes:
+One shared image serves the API, UI, **worker** and **scheduler** (same engines, different command). Design notes:
 
 - `./data` and `./uploads` are **bind-mounted** — profiles, corpora, and rankings persist on the host and stay shared with host-side CLI runs
 - The embedding model caches in a named `models` volume (`HF_HOME=/models`) — the ~90 MB download happens once, not per container
@@ -69,10 +69,11 @@ One shared image serves the API, UI and **worker** (same engines, different comm
 - **Ollama stays host-side** (resume tailoring / cover letters are CLI workflows); `backend/database/docker-compose.yml` still works standalone for DB-only development
 - Credentials override via `.env` at the repo root (`DB_USER` / `DB_PASSWORD` / `DB_NAME`)
 - The `worker` service runs `python -m backend.worker`. It waits for a healthy database, shares `./data` (profile in, `ranked_jobs.json` out) and the `models` cache with the API. `stop_grace_period: 45s` is deliberately longer than the worker's `--grace 30`, so a `docker compose stop` lets the current task finish instead of being SIGKILLed
+- The `scheduler` service runs `python -m backend.scheduler` ([Scan scheduler](#scan-scheduler)). It waits for a healthy database and needs no volumes. `SCAN_CRON` / `SCAN_MISFIRE_GRACE_S` pass through from `.env`. Run **one** copy. A second copy is harmless (it waits in standby), but it adds nothing
 
 ## Task worker
 
-`python -m backend.worker` is the consumer of the Postgres task queue (`tasks` table, [ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)). Today it runs `rank` tasks, queued by `POST /v1/rankings` and the Streamlit re-rank buttons.
+`python -m backend.worker` is the consumer of the Postgres task queue (`tasks` table, [ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)). It runs `rank` tasks, queued by `POST /v1/rankings` and the Streamlit re-rank buttons. It also runs `scan` tasks, queued by the scheduler and by `POST /v1/scans`.
 
 ```bash
 DB_HOST=localhost python -m backend.worker            # all registered kinds
@@ -84,8 +85,25 @@ python -m backend.worker --kinds rank --lease 60 --grace 30 --poll-max 10
 - **Leases.** A claimed task is leased for `--lease` seconds and heartbeated every lease/3. If the worker dies (crash, OOM, `kill -9`), the lease expires and another worker reclaims the task. Each claim counts as an attempt. A worker whose lease was reclaimed can no longer complete or fail the task: those writes are fenced on the lease holder.
 - **Retries.** A failed attempt is requeued with capped exponential backoff and jitter (5s, 10s, … up to 5 min). After `max_attempts` (3 for ranking) the task is `dead`, and `/v1/rankings/status` reports `failed` with the last error.
 - **Shutdown.** SIGTERM or SIGINT stops claiming and lets the current task finish within `--grace` seconds, then the worker exits `0`. If the task is still running when the grace period ends, the worker exits `3` and the task is recovered through lease expiry. A second signal exits immediately.
-- **Corpus.** `rank` tasks read the corpus from Postgres only (strict mode, no JSON fallback), so seed it first: `python -m backend.database.corpus import [path]`.
+- **Corpus.** `rank` tasks read the corpus from Postgres only (strict mode, no JSON fallback), so seed it first with `python -m backend.database.corpus import [path]`, or let a scan collect it.
+- **One rank at a time.** Every rank execution takes the rank lock: a session-level Postgres advisory lock on a dedicated connection, held for the scoring and the `ranked_jobs.json` write. That covers `rank` tasks, the rank step of a `scan`, and the CLIs when a database is configured. The lock is released when its holder's connection closes, so a killed worker never leaves it behind. A waiter gives up after 30 minutes, and its attempt is retried.
+- **Incremental.** Ranking only scores jobs without a current `job_scores` row for (job, profile hash, `FORMULA_VERSION`). The first rank after a resume upload, or after a `FORMULA_VERSION` bump, scores the whole corpus (minutes with the embedding model). Later ranks only score the delta. Rows for old profiles stay in `job_scores` (a few thousand per profile); nothing prunes them yet.
 - No database at all (the Streamlit Cloud demo) means no queue and no worker. The API's `POST /v1/rankings` returns 503 and the Streamlit app ranks inline.
+
+## Scan scheduler
+
+`python -m backend.scheduler` puts the corpus refresh on a clock ([ADR-001 §3](adr/ADR-001-v2-always-on-architecture.md)). It is APScheduler 3.x with its job store in Postgres (table `apscheduler_jobs`, created and owned by APScheduler, not `schema.sql`), running in timezone **Asia/Kolkata**. It has one job, `scan:scheduled`, on `SCAN_CRON` (default `0 9 * * *`, i.e. 09:00 IST / 03:30 UTC). See [CONFIGURATION.md](../CONFIGURATION.md#scheduled-scans).
+
+```bash
+DB_HOST=localhost python -m backend.scheduler
+```
+
+- **It only enqueues.** Each due run inserts one `scan` task and returns. The worker collects, upserts and ranks. The scheduler never imports the ML stack.
+- **One task per slot.** The task's idempotency key is `scan:scheduled:<scheduled fire time, UTC>`. It comes from the *scheduled* time, not the clock at execution, so re-firing a slot after a restart or crash is a no-op. If a scan (say, a manual `POST /v1/scans`) is still queued or running at fire time, the scheduled one is logged and skipped.
+- **Missed runs** (`coalesce`, `max_instances=1`, `misfire_grace_time = SCAN_MISFIRE_GRACE_S`). If the scheduler was down at fire time and comes back within the grace window, the slot runs once. If it comes back later, the slot is skipped. Several missed slots produce one run. A restart keeps the stored next run time unless `SCAN_CRON` changed.
+- **Leader election.** APScheduler 3.x can't share a job store between processes, so the scheduler takes `pg_try_advisory_lock` on a dedicated connection with TCP keepalives. A second copy waits in **standby**, retrying every 15 seconds, and starts nothing that could fire. If the leader's lock connection dies, Postgres releases the lock. The leader then fires nothing more (it re-checks the lock before every round of due jobs and leaves the stored next run time for whoever leads next) and exits with code `3`. `restart: unless-stopped` brings it back.
+- **Exit codes:** `0` stopped (SIGTERM/SIGINT), `2` no reachable database, `3` lost the leader lock, `4` bad `SCAN_CRON` / `SCAN_MISFIRE_GRACE_S`.
+- Without a database there is no scheduler. Refresh the JSON corpus by hand with `python -m backend.job_scraper.ats_collector`.
 
 ## Single-Host Server Deployment (small-team demo)
 

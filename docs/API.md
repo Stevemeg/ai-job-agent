@@ -1,6 +1,6 @@
 # API (FastAPI — implemented)
 
-> **Status: implemented** for profile, analysis, rankings, and tracker (`backend/api/`). Document-generation endpoints (tailored resume, cover letter) remain CLI-only for now — they need Ollama and are the next candidates for async endpoints.
+> **Status: implemented** for profile, analysis, rankings, scans, and tracker (`backend/api/`). Document-generation endpoints (tailored resume, cover letter) remain CLI-only for now — they need Ollama and are the next candidates for async endpoints.
 
 Run from project root:
 
@@ -23,9 +23,11 @@ Design rules: routers contain no business logic (every endpoint is a thin adapte
 | GET | `/v1/profile/gaps` | `analysis.skill_gap.compute_skill_gaps` | Role-weighted skill gaps |
 | GET | `/v1/profile/careers` | `analysis.career_recommender.recommend_careers` | Role fits + evidence + missing |
 | GET | `/v1/profile/suggestions` | `analysis.suggestions.generate_suggestions` | Evidence-backed suggestions |
-| POST | `/v1/rankings` | `services.ranking.request_ranking` → worker runs `matching_engine.matcher.rank_jobs` | Queue a ranking run (202). 409 while one is active; 503 without a database ([details](#rankings-on-the-task-queue)) |
+| POST | `/v1/rankings` | `services.ranking.request_ranking` → worker runs `services.ranking.execute_rank` | Queue a ranking run (202). 409 while one is active; 503 without a database ([details](#rankings-on-the-task-queue)) |
 | GET | `/v1/rankings/status` | `services.ranking.status_from_task` | Poll ranking state |
 | GET | `/v1/rankings` | — | Ranked results (limit/offset/min_score) |
+| POST | `/v1/scans` | `services.scan.request_scan` → worker runs `services.scan.run_scan_task` | Queue a scan now: collect, upsert, re-rank new/changed jobs (202). 409 while one is active; 503 without a database ([details](#scans)) |
+| GET | `/v1/scans/latest` | `services.scan.scan_status` | The latest scan's state and, once done, its stats |
 | GET | `/v1/tracker` | `database.tracker.get_tracked_jobs` | Tracked applications with derived status |
 | POST | `/v1/tracker/events` | `database.events.log_outcome` | Log save/applied/interview/rejected/offer/dismiss |
 
@@ -33,7 +35,9 @@ Design rules: routers contain no business logic (every endpoint is a thin adapte
 
 Ranking takes minutes, so it runs on the durable worker ([ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)), not in the API process. The contract from v1 is unchanged: `POST` returns `202`, clients poll `/status`, and `GET /v1/rankings` serves the same payload. What changed is where the work runs.
 
-`POST /v1/rankings` enqueues a `rank` task in the Postgres `tasks` table with `concurrency_key = "rank:default"`. The worker (`python -m backend.worker`, see [DEPLOYMENT.md](DEPLOYMENT.md#task-worker)) claims it, ranks the profile against the **database** corpus, and writes `data/ranked_jobs.json`. It is the only writer of that file.
+`POST /v1/rankings` enqueues a `rank` task in the Postgres `tasks` table with `concurrency_key = "rank:default"`. The worker (`python -m backend.worker`, see [DEPLOYMENT.md](DEPLOYMENT.md#task-worker)) claims it, ranks the profile against the **database** corpus, and writes `data/ranked_jobs.json`. Every write of that file goes through `services.ranking` (the worker; with no database, the Streamlit demo and the CLIs).
+
+Since Phase 3 a rank run is **incremental**. Each job's matcher output is cached in `job_scores` per (job, profile hash, `FORMULA_VERSION`), and only jobs with no cached row for their current content are scored. A new profile or a formula bump rescores everything. The assembled list is exactly what a full `rank_jobs` would return, and `GET /v1/rankings` is unchanged. Every rank execution, from this endpoint or from a scan, holds a Postgres advisory lock for the scoring and the file write, so two never interleave. The task `result` keeps `ranked_count`, `corpus_version` and `formula_version`, and adds `scored`, `skipped_unchanged` and `profile_hash`.
 
 | Response | When |
 |---|---|
@@ -57,6 +61,45 @@ Ranking takes minutes, so it runs on the durable worker ([ADR-001 §2](adr/ADR-0
 | `dead` (attempts exhausted) | `failed` | the last error (`Type: message`) |
 
 Without a database, `/status` never errors: it reports `done` ("loaded from previous run") or `idle` from the ranked file alone. With a configured but unreachable database it returns `503`.
+
+## Scans
+
+A scan refreshes the corpus and the rankings in one task. It collects from the public ATS boards (Greenhouse, Lever, Ashby), upserts into `canonical_jobs`, then runs an incremental rank. The worker runs it as a `scan` task. The scheduler (`python -m backend.scheduler`, see [DEPLOYMENT.md](DEPLOYMENT.md#scan-scheduler)) queues one every `SCAN_CRON` (default 09:00 IST). `POST /v1/scans` queues one now.
+
+| Response | When |
+|---|---|
+| `202` + `ScanStatus` (`state: running`, `trigger: "api"`) | Scan queued |
+| `409` "A scan is already in progress." | A scan, scheduled or manual, is already queued or running (`concurrency_key = "scan:default"`) |
+| `503` | No database configured, or the configured one doesn't answer (probed with `DB_CONNECT_TIMEOUT`) |
+
+No profile is needed. Without one the scan still refreshes the corpus and skips ranking (`result.rank_skipped`, `profile_hash: null`).
+
+`GET /v1/scans/latest` returns the latest scan task as `ScanStatus`. It is `503` without a database, and `state: idle` before the first scan.
+
+| Field | Meaning |
+|---|---|
+| `state`, `detail` | `idle`, `running`, `done` or `failed`, with the same wording as `/v1/rankings/status` (queued, retrying, stalled, running, or the last error) |
+| `task_id`, `attempts`, `max_attempts` | The `tasks` row (3 attempts) |
+| `trigger`, `scheduled_for` | `"schedule"` (with the slot's fire time, UTC) or `"api"` |
+| `created_at`, `started_at`, `finished_at` | Timestamps (UTC) |
+| `result` | Set when `done`, otherwise `null` |
+
+`result` fields:
+
+| Field | Meaning |
+|---|---|
+| `inserted`, `updated`, `changed` | From the upsert: new jobs, re-sighted jobs, and re-sighted jobs whose content changed |
+| `scored`, `skipped_unchanged` | Jobs scored by this scan's rank, and jobs whose cached score was still current. An unchanged re-scan scores 0 |
+| `sources_ok`, `sources_failed` | Boards fetched, and `[{source, slug, error}]` for the ones that failed after the collector's retries. A failing board doesn't fail the scan. Only when **every** board fails does the attempt fail and retry with backoff |
+| `duration_s` | Wall time of the whole scan |
+| `corpus_version`, `profile_hash`, `formula_version`, `ranked_count` | What was ranked, for whom, and how many jobs passed the gates |
+
+```http
+POST /v1/scans               -> 202 {"state": "running", "task_id": 12, "trigger": "api", "detail": "Task #12 queued, waiting for a worker (attempt 0/3).", ...}
+GET  /v1/scans/latest        -> 200 {"state": "done", "task_id": 12, "result": {"inserted": 0, "updated": 4676, "changed": 0, "scored": 0, "skipped_unchanged": 4676, "sources_ok": 23, "sources_failed": [{"source": "greenhouse", "slug": "doordash", "error": "HTTP 404 (board not found -- renamed or removed token?)"}, ...], "duration_s": 65.62, "ranked_count": 1609, ...}}
+```
+
+(The `result` above is from a real re-scan of the live boards right after a first scan: nothing had changed, so nothing was scored. The first scan inserted and scored all 4,676 jobs in about 9 minutes on a laptop CPU.)
 
 ## Endpoints (planned)
 

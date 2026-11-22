@@ -38,6 +38,16 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_HOST` / `DB_PORT` | env / `.env` | dev defaults | PostgreSQL connection |
 | `DATABASE_URL` | env | — | Full PostgreSQL URL (Render/Neon); takes priority over `DB_*` |
 | `DB_CONNECT_TIMEOUT` | env | `3` | Seconds the corpus loader waits when probing the database |
+| `SCAN_CRON` | env / `.env` | `0 9 * * *` | When the scheduler queues a scan: a 5-field crontab in **Asia/Kolkata** time (the default is 09:00 IST = 03:30 UTC) |
+| `SCAN_MISFIRE_GRACE_S` | env / `.env` | `3600` | How late a missed scan may still run, in seconds. If the scheduler was down at the fire time and comes back within this window, the slot runs once; after that it is skipped. Several missed slots run once |
+
+## Scheduled scans
+
+`python -m backend.scheduler` reads `SCAN_CRON` and `SCAN_MISFIRE_GRACE_S` at start-up and refuses to start (exit code `4`) if either is malformed. Changing `SCAN_CRON` replaces the stored schedule on the next start, and the next run is computed from the new expression. The scheduler needs the database (`DATABASE_URL` or `DB_HOST`), and so does the worker that runs the scans. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#scan-scheduler).
+
+```bash
+SCAN_CRON="30 6 * * 1-5" SCAN_MISFIRE_GRACE_S=1800 DB_HOST=localhost python -m backend.scheduler   # 06:30 IST on weekdays
+```
 
 ## Job corpus source
 
