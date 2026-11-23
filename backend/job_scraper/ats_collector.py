@@ -45,6 +45,8 @@ from ..config import JOBS_FILE
 # SEED COMPANIES — curated, AI/ML/Data/Backend-heavy. Add more as you find
 # them: visit https://job-boards.greenhouse.io/<token>, https://jobs.lever.co/
 # <company>, or https://jobs.ashbyhq.com/<name> to discover a company's token.
+# Or probe for them: python -m backend.job_scraper.probe_boards <names...>
+# keeps only boards that answer and have a posting in AGENT_LOCATIONS.
 # --------------------------------------------------------------------------
 GREENHOUSE_COMPANIES = [
     # DoorDash's board token is "doordashusa" (board name "DoorDash USA");
@@ -52,17 +54,19 @@ GREENHOUSE_COMPANIES = [
     "stripe", "airbnb", "robinhood", "doordashusa", "coinbase", "asana",
     "discord", "pinterest", "lyft", "instacart", "affirm", "gitlab",
     "databricks", "scaleai", "anthropic",
+    # India-based boards, verified with probe_boards on 2026-11-23 (HTTP 200,
+    # India-eligible / total postings then): Groww 7/7, Observe.AI 5/10,
+    # InMobi 39/71.
+    "groww", "observeai", "inmobi",
 ]
 
 LEVER_COMPANIES = [
-    # Disabled for now. 11 guessed slugs (including "attentive", verified
-    # directly against the live API as returning {"ok":false,"error":
-    # "Document not found"}) all failed. Unlike Greenhouse/Ashby, there's no
-    # reliable public directory of Lever-hosted companies to guess from
-    # outside the platform, so blind seeding doesn't work here.
-    #
-    # To re-enable: if you ever see a careers page at jobs.lever.co/<slug>
-    # while job-hunting normally, that slug is confirmed real — add it here.
+    # Only slugs confirmed against the live API: the first 11 guessed slugs
+    # (including "attentive") all returned {"ok":false,"error":"Document not
+    # found"}, and there is no public directory of Lever-hosted companies.
+    # Verified with probe_boards on 2026-11-23 (India-eligible / total):
+    # CRED 11/12, Meesho 47/48.
+    "cred", "meesho",
 ]
 
 ASHBY_COMPANIES = [
@@ -70,6 +74,9 @@ ASHBY_COMPANIES = [
     # 404 (checked 2026-11-23 against the posting API).
     "ramp", "openai", "linear", "watershed", "mercury", "vanta",
     "modal", "replit", "perplexity", "deel",
+    # Verified with probe_boards on 2026-11-23 (India-eligible / total):
+    # Atlan 3/7, Sarvam AI 40/40 (its board name is "sarvam").
+    "atlan", "sarvam",
 ]
 
 REQUEST_TIMEOUT = 10
