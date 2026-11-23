@@ -73,7 +73,7 @@ One shared image serves the API, UI, **worker** and **scheduler** (same engines,
 
 ## Task worker
 
-`python -m backend.worker` is the consumer of the Postgres task queue (`tasks` table, [ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)). It runs `rank` tasks, queued by `POST /v1/rankings` and the Streamlit re-rank buttons. It also runs `scan` tasks, queued by the scheduler and by `POST /v1/scans`.
+`python -m backend.worker` is the consumer of the Postgres task queue (`tasks` table, [ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)). It runs `rank` tasks, queued by `POST /v1/rankings` and the Streamlit re-rank buttons. It runs `scan` tasks, queued by the scheduler and by `POST /v1/scans`. And it runs the agent's `agent_run` and `application` tasks ([below](#agent-dry-run)).
 
 ```bash
 DB_HOST=localhost python -m backend.worker            # all registered kinds
@@ -104,6 +104,18 @@ DB_HOST=localhost python -m backend.scheduler
 - **Leader election.** APScheduler 3.x can't share a job store between processes, so the scheduler takes `pg_try_advisory_lock` on a dedicated connection with TCP keepalives. A second copy waits in **standby**, retrying every 15 seconds, and starts nothing that could fire. If the leader's lock connection dies, Postgres releases the lock. The leader then fires nothing more (it re-checks the lock before every round of due jobs and leaves the stored next run time for whoever leads next) and exits with code `3`. `restart: unless-stopped` brings it back.
 - **Exit codes:** `0` stopped (SIGTERM/SIGINT), `2` no reachable database, `3` lost the leader lock, `4` bad `SCAN_CRON` / `SCAN_MISFIRE_GRACE_S`.
 - Without a database there is no scheduler. Refresh the JSON corpus by hand with `python -m backend.job_scraper.ats_collector`.
+
+## Agent (dry run)
+
+Phase 4 adds two task kinds that the same worker runs: `agent_run`, queued by `POST /v1/agent/runs` and, with `AGENT_ENABLED=true`, by every scan; and `application`, queued by an agent run, one per triaged job. Both are LangGraph graphs checkpointed in Postgres. See [API.md](API.md#agent-phase-4-dry-run).
+
+- **No outbound actions.** The agent drafts files and records them. It sends no email, uploads nothing and submits nothing. The only network traffic is the LLM provider's.
+- **LLM.** Configure the worker's provider as for the UI. In Docker that means `GROQ_API_KEY` in `.env`: compose passes it to the worker, and Ollama on the host isn't reachable from containers. `LLM_PROVIDER=fake` drafts offline with deterministic text (for tests and smoke runs).
+- **Node.** The worker renders `.docx` files with `backend/resume_engine/*.js`. The image installs Node and runs `npm ci` for them. On a bare host, install Node and run `npm ci` in `backend/resume_engine`.
+- **Files.** Drafts are written to `data/applications/<application_id>/` and recorded with their sha256 in `application_artifacts`. In compose, `./data` is bind-mounted into the worker and the API, so the API serves the worker's files.
+- **Checkpoints.** LangGraph's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) are created by the worker on first use, under the same advisory lock as the app's migrations, in the app's database and schema. They are not in `schema.sql`. Each graph step is committed before the next starts (`durability="sync"`). So a retried task resumes at the node its last attempt died in, and nodes it finished are not run again. Nothing prunes old threads yet.
+- **Failure.** An LLM outage or a failing node fails the attempt, which is retried with backoff like any task. After the last attempt the application is marked `failed` with the error. That also happens when a worker dies on the last attempt and its lease expires.
+- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
 
 ## Single-Host Server Deployment (small-team demo)
 

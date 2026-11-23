@@ -2,16 +2,21 @@
 
 All configuration is via Streamlit Secrets (deployment) or environment variables (local/CLI/Docker). **Nothing is ever hardcoded.**
 
-## LLM Provider (automatic selection)
+## LLM Provider
 
-The engines call `backend.llm.generate(prompt)` and never know which backend serves it:
+The engines call `backend.llm.generate(prompt)` and never know which backend serves it. `LLM_PROVIDER` picks one; unset (or `auto`) keeps the automatic selection:
 
-| Condition | Provider | Default model |
-|---|---|---|
-| `GROQ_API_KEY` present (Streamlit Secrets or env) | **Groq** (hosted — production) | `llama-3.3-70b-versatile` |
-| No key | **Ollama** (localhost — development) | `mistral` |
+| `LLM_PROVIDER` | Condition | Provider | Default model |
+|---|---|---|---|
+| `auto` (default) | `GROQ_API_KEY` present (Streamlit Secrets or env) | **Groq** (hosted — production) | `llama-3.3-70b-versatile` |
+| `auto` (default) | No key | **Ollama** (localhost — development) | `mistral` |
+| `groq` | Needs `GROQ_API_KEY` (error without it) | **Groq** | `llama-3.3-70b-versatile` |
+| `ollama` | Ignores any `GROQ_API_KEY` | **Ollama** | `mistral` |
+| `fake` | Always | **Fake**: deterministic and offline, for CI and tests (`backend/llm/fake_provider.py`) | — |
 
-The deterministic hallucination validator runs on the output of *either* provider — no provider is trusted.
+The deterministic hallucination validator runs on the output of *every* provider — no provider is trusted.
+
+The fake provider files each call under a step (`extract_requirements`, `tailor_resume`, `tailor_bullets`, `order_skills`, `cover_letter`) by a marker phrase in its prompt and answers with a deterministic function of the prompt. Tests steer it with `FAKE_LLM_SLEEP` (`step=seconds,...`), `FAKE_LLM_RAISE` (`step=unavailable|error|none,...`) and `FAKE_LLM_LOG` (a file that gets one JSON line per call, written before any sleep, so calls are countable across processes). CI runs with `LLM_PROVIDER=fake`.
 
 ### Setting the Groq key
 
@@ -40,6 +45,11 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `DB_CONNECT_TIMEOUT` | env | `3` | Seconds the corpus loader waits when probing the database |
 | `SCAN_CRON` | env / `.env` | `0 9 * * *` | When the scheduler queues a scan: a 5-field crontab in **Asia/Kolkata** time (the default is 09:00 IST = 03:30 UTC) |
 | `SCAN_MISFIRE_GRACE_S` | env / `.env` | `3600` | How late a missed scan may still run, in seconds. If the scheduler was down at the fire time and comes back within this window, the slot runs once; after that it is skipped. Several missed slots run once |
+| `LLM_PROVIDER` | env | `auto` | `auto`, `groq`, `ollama` or `fake` (see above) |
+| `AGENT_ENABLED` | env / `.env` (worker) | `false` | When `true`, every scan queues an agent run as its last step. Manual runs (`POST /v1/agent/runs`) work either way |
+| `AGENT_MIN_SCORE` | env / `.env` (worker) | `80` | Triage: a job's `match_score` must be at least this |
+| `AGENT_MAX_JOB_AGE_DAYS` | env / `.env` (worker) | `14` | Triage: the job must have been seen by a scan within this many days (`last_seen_at`) |
+| `AGENT_MAX_DRAFTS_PER_RUN` | env / `.env` (worker) | `5` | Triage: at most this many new applications per run (`0` drafts nothing) |
 
 ## Scheduled scans
 
@@ -47,6 +57,16 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 
 ```bash
 SCAN_CRON="30 6 * * 1-5" SCAN_MISFIRE_GRACE_S=1800 DB_HOST=localhost python -m backend.scheduler   # 06:30 IST on weekdays
+```
+
+## The agent (Phase 4, dry run)
+
+The agent drafts a tailored resume and cover letter for the best new jobs. It never sends, uploads or submits anything (ADR-001). The worker reads the `AGENT_*` variables at the start of each run, so a changed `.env` takes effect on the next run without a restart. A malformed value fails the run with a clear error.
+
+Triage takes jobs that were scored for the **current** profile under the **current** scoring cache key, passed the hard gates, score at least `AGENT_MIN_SCORE`, were seen within `AGENT_MAX_JOB_AGE_DAYS`, have no application yet, and have no `applied`, `dismiss` or `declined` event. It takes the best `AGENT_MAX_DRAFTS_PER_RUN` of them. Drafts go to `data/applications/<application_id>/`. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#agent-dry-run) and [API.md](docs/API.md#agent-phase-4-dry-run).
+
+```bash
+AGENT_ENABLED=true AGENT_MIN_SCORE=75 DB_HOST=localhost python -m backend.worker
 ```
 
 ## Job corpus source

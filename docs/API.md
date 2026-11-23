@@ -28,6 +28,11 @@ Design rules: routers contain no business logic (every endpoint is a thin adapte
 | GET | `/v1/rankings` | — | Ranked results (limit/offset/min_score) |
 | POST | `/v1/scans` | `services.scan.request_scan` → worker runs `services.scan.run_scan_task` | Queue a scan now: collect, upsert, re-rank new/changed jobs (202). 409 while one is active; 503 without a database ([details](#scans)) |
 | GET | `/v1/scans/latest` | `services.scan.scan_status` | The latest scan's state and, once done, its stats |
+| POST | `/v1/agent/runs` | `agent.run_graph.request_agent_run` → worker runs the agent run graph | Queue an agent run: refresh the ranking, triage, dispatch drafts (202). 409 while one is active or with no profile; 503 without a database ([details](#agent-phase-4-dry-run)) |
+| GET | `/v1/agent/runs/latest` | `agent.run_graph.agent_run_status` | The latest agent run's state and, once done, what it triaged and dispatched |
+| GET | `/v1/applications` | `agent.store.list_applications` | Drafted applications, newest first (`status`, `limit`, `offset`) |
+| GET | `/v1/applications/{id}` | `agent.store.get_application` | Status, score, validator reports, task state, artifact list |
+| GET | `/v1/applications/{id}/artifacts/{kind}` | — | Download one drafted file |
 | GET | `/v1/tracker` | `database.tracker.get_tracked_jobs` | Tracked applications with derived status |
 | POST | `/v1/tracker/events` | `database.events.log_outcome` | Log save/applied/interview/rejected/offer/dismiss |
 
@@ -99,7 +104,47 @@ POST /v1/scans               -> 202 {"state": "running", "task_id": 12, "trigger
 GET  /v1/scans/latest        -> 200 {"state": "done", "task_id": 12, "result": {"inserted": 0, "updated": 4676, "changed": 0, "scored": 0, "skipped_unchanged": 4676, "sources_ok": 23, "sources_failed": [{"source": "greenhouse", "slug": "doordash", "error": "HTTP 404 (board not found -- renamed or removed token?)"}, ...], "duration_s": 65.62, "ranked_count": 1609, ...}}
 ```
 
-(The `result` above is from a real re-scan of the live boards right after a first scan: nothing had changed, so nothing was scored. The first scan inserted and scored all 4,676 jobs in about 9 minutes on a laptop CPU.)
+(The `result` above is from a real re-scan of the live boards right after a first scan: nothing had changed, so nothing was scored. The first scan inserted and scored all 4,676 jobs in about 9 minutes on a laptop CPU. The two boards that failed then, `greenhouse/doordash` and `ashby/perplexity-ai`, have since been switched to their current names, `doordashusa` and `perplexity`.)
+
+If `AGENT_ENABLED=true` and a profile exists, the scan's last step queues an agent run, keyed `agent_run:scan:<scan task id>` so a retried scan never queues a second one. The task row's `result` then also has `agent_run: {"task_id": n}`. That key is not part of `ScanResult`, and the `/v1/scans` responses are unchanged.
+
+## Agent (Phase 4, dry run)
+
+The agent drafts a tailored resume and cover letter for the best new jobs. **Nothing leaves the system.** There is no email, no upload and no submission. The only network traffic is the LLM provider's. Two LangGraph graphs run as worker tasks, each checkpointed in Postgres ([ADR-001 addendum](adr/ADR-001-v2-always-on-architecture.md#addendum-phase-4-the-queue-and-langgraph-split)).
+
+**`POST /v1/agent/runs`** queues an `agent_run` task. Its graph, on thread `agent_run:<task_id>`:
+
+1. `refresh_ranking` runs the same incremental rank as `rank` and `scan` tasks, under the rank lock. When nothing changed it scores nothing.
+2. `triage` picks jobs from `job_scores` for the **current** profile and cache key. A job qualifies if it passed the gates, scored at least `AGENT_MIN_SCORE` (80), was seen within `AGENT_MAX_JOB_AGE_DAYS` (14), has no application yet, and has no `applied`, `dismiss` or `declined` event. Best first, at most `AGENT_MAX_DRAFTS_PER_RUN` (5). See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+3. `dispatch` creates, for each job in **one transaction**, the `applications` row (`queued`) and its `application` task (idempotency key `application:<id>`). Re-running never duplicates one, because of `UNIQUE (user_id, job_id)`.
+
+Each `application` task runs the application graph on thread `application:<id>`:
+
+`load → extract_requirements → tailor_resume → validate_resume → cover_letter → validate_letter → render → persist`
+
+- There is one LLM call per LLM node. The JD requirements are extracted once and used for both documents.
+- The truthfulness validators are the resume engine's, unchanged. A flagged resume project keeps its original bullets, and a flagged letter paragraph is reported. Nothing is regenerated. Any flag makes the status **`needs_review`**; otherwise it is **`drafted`**.
+- The files go to `data/applications/<id>/`: `resume.docx`, `cover_letter.docx`, `cover_letter.txt` and `jd_requirements.json`. `persist` records each one, with its sha256 and validator report, and logs one `drafted` event with the score snapshot, all in one transaction.
+- A retried task resumes from its last checkpoint. A worker killed in `tailor_resume` costs one more `tailor_resume` call, and nothing before it runs again. An LLM outage fails the attempt, which is retried with backoff. Once the task is dead, the application is **`failed`** with the error.
+
+```http
+POST /v1/agent/runs          -> 202 {"state": "running", "task_id": 31, "trigger": "api", "detail": "Task #31 queued, waiting for a worker (attempt 0/3).", ...}
+POST /v1/agent/runs          -> 409 {"detail": "An agent run is already in progress."}
+GET  /v1/agent/runs/latest   -> 200 {"state": "done", "task_id": 31, "result": {"triaged": 2, "dispatched": [{"application_id": 7, "task_id": 32, "job_id": 1204, "match_score": 86.4, "title": "...", "company": "..."}, ...], "skipped_existing": 0, "refresh": {"scored": 0, "skipped_unchanged": 4676, ...}, "profile_hash": "...", "cache_key": "1:3f9c...", "settings": {...}, ...}}
+GET  /v1/applications        -> 200 [{"id": 7, "job_id": 1204, "title": "...", "company": "...", "status": "needs_review", "match_score": 86.4, "error": null, ...}]
+GET  /v1/applications/7      -> 200 {..., "validator": {"resume": {"ok": false, "projects": [{"project": "...", "ok": false, "flagged": ["Kubernetes"]}, ...]}, "cover_letter": {"ok": true, "paragraphs": []}}, "artifacts": [{"kind": "resume_docx", "sha256": "...", "size_bytes": 10012, "download_url": "/v1/applications/7/artifacts/resume_docx", "report": {...}}, ...], "task": {"task_id": 32, "state": "done", "attempts": 1, ...}}
+GET  /v1/applications/7/artifacts/cover_letter_txt -> 200 text/plain (X-Artifact-SHA256: ...)
+```
+
+| Status | Meaning |
+|---|---|
+| `queued` | Dispatched; its task is waiting for a worker |
+| `drafting` | The graph is running (or waiting to retry after a failed attempt) |
+| `drafted` | All four files written; the validator flagged nothing |
+| `needs_review` | All four files written; the validator flagged something. Read `validator` before using them |
+| `failed` | The task died; `error` has the last error |
+
+Artifact kinds are `resume_docx`, `cover_letter_docx`, `cover_letter_txt` and `jd_requirements`. An unknown kind, an application with no such file yet, or a file deleted from disk returns 404. `?status=` must be one of the statuses above (otherwise 422).
 
 ## Endpoints (planned)
 

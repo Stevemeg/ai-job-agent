@@ -183,3 +183,65 @@ Phase 7.
   `cover_letter.validate_letter` does) before they can be generated.
 - **More moving parts to run** (API, worker, scheduler, database) than v1's
   API, UI and database. Health checks and run logs are Phase 7 work.
+
+## Addendum (Phase 4): the queue and LangGraph split
+
+- **Date:** 2026-11-23
+- **Status:** Accepted (Phase 4, dry run)
+
+§1 drew one graph, `scan → upsert → rank → shortlist → generate → validate
+→ approval → execute → record`. Phase 4 builds it as **queue tasks that
+each run a checkpointed LangGraph graph**, cut at the points where work
+fans out or is already a task:
+
+```mermaid
+flowchart LR
+    SCH[scheduler] -->|scan task| SCAN[scan<br/>collect, upsert, rank]
+    API[POST /v1/agent/runs] -->|agent_run task| RUN
+    SCAN -->|"agent_run task<br/>key agent_run:scan:&lt;id&gt;<br/>(AGENT_ENABLED)"| RUN[run graph<br/>refresh_ranking → triage → dispatch]
+    RUN -->|"row + application task,<br/>one transaction, per job"| APP[application graph<br/>load → extract → tailor → validate →<br/>letter → validate → render → persist]
+    RUN <-->|checkpoints| CP[(checkpointer)]
+    APP <-->|checkpoints| CP
+```
+
+**The queue owns *between-task* durability, LangGraph owns *within-task*
+durability.**
+
+- The **task queue** (§2) decides what runs, where and when. It provides
+  leases, fencing, retries with backoff, `max_attempts`, dead tasks,
+  concurrency keys (one agent run at a time) and idempotency keys (a
+  retried scan chains the same agent run; each application has exactly one
+  task). These are all things LangGraph doesn't provide across processes.
+- **LangGraph** decides how far a task got. Each task invokes its graph on
+  a thread named after the work (`agent_run:<task_id>`,
+  `application:<application_id>`) with `durability="sync"`, so every
+  step's checkpoint is committed before the next step starts. A retried
+  task invokes the same thread again and resumes at the node its last
+  attempt died in: finished nodes, and their LLM calls, never re-run. A
+  thread that already finished returns its saved final state. LangGraph
+  runs with no retry policy of its own, so all retrying stays in one
+  place.
+- **Fan-out goes through the queue, not `Send`.** `dispatch` writes each
+  `applications` row and its `application` task in the same transaction
+  (§2: "enqueue in the same transaction as the domain write"). Each
+  application is then a separate task and a separate thread, which is §1's
+  "one graph thread per (candidate, job)". Applications get leased,
+  retried and failed on their own, and any worker can take them. In-graph
+  fan-out would tie them all to one task's lease and one worker.
+- **The scan stays a plain task.** It existed before the agent and also
+  runs without it (`AGENT_ENABLED=false`, the default). It chains the
+  agent as its last step instead of becoming a node.
+- **Failure ends in the domain.** When a task is dead (last attempt
+  raised, or its lease expired on the last attempt), a per-kind dead
+  handler on the worker marks the application `failed` with the error.
+- **Granularity:** one LLM call per LLM node. A crash re-runs at most one
+  call. The agent's resume tailoring is therefore one call for all
+  projects (`tailor_resume_single_call`); the CLI keeps its per-project
+  calls.
+- **Phase 5** adds the approval gate as an `interrupt()` in the
+  application graph after `persist`, resumed with `Command(resume=…)` on
+  the same thread. Nothing in Phase 4 sends, uploads or submits anything.
+
+Consequences: there are two kinds of durable state to operate, task rows
+and checkpoint threads, and nothing prunes old threads yet (Phase 7). Their
+names make each one traceable from the other.
