@@ -43,19 +43,48 @@ def get_groq_api_key() -> str | None:
 
 _provider = None
 
+PROVIDER_CHOICES = ("auto", "groq", "ollama", "fake")
+
+
+def provider_choice() -> str:
+    """LLM_PROVIDER (default "auto"), validated."""
+    choice = (os.environ.get("LLM_PROVIDER") or "auto").strip().lower()
+    if choice not in PROVIDER_CHOICES:
+        raise ValueError(f"LLM_PROVIDER must be one of {', '.join(PROVIDER_CHOICES)}; "
+                         f"got {choice!r}")
+    return choice
+
 
 def get_provider():
-    """Groq when a key exists, Ollama otherwise. Cached per process."""
+    """The provider LLM_PROVIDER names. "auto" (the default, and v1's only
+    behaviour): Groq when a key exists, Ollama otherwise. "fake": the
+    deterministic offline provider for CI and tests (fake_provider.py).
+    Cached per process (reset_provider() drops the cache)."""
     global _provider
     if _provider is None:
-        key = get_groq_api_key()
+        choice = provider_choice()
+        if choice == "fake":
+            from .fake_provider import FakeProvider
+            _provider = FakeProvider()
+            return _provider
+        key = get_groq_api_key() if choice in ("auto", "groq") else None
         if key:
             from .groq_provider import GroqProvider
             _provider = GroqProvider(key)
+        elif choice == "groq":
+            raise LLMUnavailableError(
+                "LLM_PROVIDER=groq but no GROQ_API_KEY is configured (add one "
+                "to Streamlit Secrets or the environment).")
         else:
             from .ollama_provider import OllamaProvider
             _provider = OllamaProvider()
     return _provider
+
+
+def reset_provider() -> None:
+    """Forget the cached provider (the next generate() re-reads LLM_PROVIDER)."""
+    global _provider
+    _provider = None
 
 
 def generate(prompt: str, model: str | None = None):

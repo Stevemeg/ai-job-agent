@@ -186,3 +186,20 @@ def rank_files(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(ranking, "PROFILE_FILE", profile_file)
     monkeypatch.setattr(ranking, "RANKED_FILE", ranked_file)
     return profile_file, ranked_file
+
+
+# ---- LLM ---------------------------------------------------------------------
+
+@pytest.fixture
+def fake_llm(monkeypatch):
+    """LLM_PROVIDER=fake for this test, with fresh call counts and no
+    overrides (backend/llm/fake_provider.py). Yields its CONTROL hook."""
+    from backend.llm import fake_provider, provider
+    for var in ("FAKE_LLM_SLEEP", "FAKE_LLM_RAISE", "FAKE_LLM_LOG"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    provider.reset_provider()
+    fake_provider.CONTROL.reset()
+    yield fake_provider.CONTROL
+    fake_provider.CONTROL.reset()
+    provider.reset_provider()
