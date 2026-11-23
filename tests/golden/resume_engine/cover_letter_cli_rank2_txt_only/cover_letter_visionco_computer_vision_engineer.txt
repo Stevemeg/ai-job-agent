@@ -1,0 +1,16 @@
+Test Candidate
+test@example.com
++91 9999999999
+
+Re: Computer Vision Engineer -- VisionCo
+
+Dear Hiring Team,
+
+The candidate is applying to VisionCo with project evidence.
+
+The strongest evidence is the RAG Medical Copilot project.
+
+The candidate is available immediately.
+
+Sincerely,
+Test Candidate

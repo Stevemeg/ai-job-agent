@@ -1,0 +1,13 @@
+Loading ranked list from <DATA>/ranked_jobs.json...
+
+Tailoring resume for: AI Engineer @ TestCo
+Match score: 88.5
+Strong matches: ['RAG', 'FAISS']
+
+Tailoring (JD analysis -> bullets -> validation -> docx)...
+  Tailoring project bullets...
+  [OK] RAG Medical Copilot: all bullets verified against original
+  [OK] GAN Image Synthesizer: all bullets verified against original
+  Ordering skills by relevance...
+ERROR: docx generation failed: Error: boom from docx
+[exit 1]

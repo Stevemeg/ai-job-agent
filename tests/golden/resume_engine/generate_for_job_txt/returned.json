@@ -1,0 +1,17 @@
+[
+  "<DATA>/cover_letter_testco_ai_engineer.txt",
+  [
+    "The candidate is applying to TestCo with project evidence.",
+    "The strongest evidence is the RAG Medical Copilot project.",
+    "Reached 99% accuracy."
+  ],
+  [
+    {
+      "paragraph": 3,
+      "flags": [
+        "Reached",
+        "99%"
+      ]
+    }
+  ]
+]

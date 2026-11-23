@@ -1,0 +1,19 @@
+[
+  "<DATA>/resume_testco_ai_engineer.docx",
+  [
+    {
+      "project": "RAG Medical Copilot",
+      "ok": true,
+      "flagged": []
+    },
+    {
+      "project": "GAN Image Synthesizer",
+      "ok": false,
+      "flagged": [
+        "50000",
+        "Databricks",
+        "Scaled"
+      ]
+    }
+  ]
+]
