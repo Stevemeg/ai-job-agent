@@ -1,7 +1,7 @@
 """
 db.py — Postgres connection layer + ORM models for users, canonical_jobs,
-events, tasks, job_scores, applications, application_artifacts, approvals
-and application_actions.
+events, tasks, job_scores, applications, application_artifacts, approvals,
+application_actions and agent_memories.
 
 Connection string is read from environment variables (see .env.example).
 Never hardcode credentials here -- this file is committed to your repo.
@@ -334,6 +334,9 @@ class Application(Base):
     # The documents' version: 0 until drafted, 1 for the first draft, +1 per
     # edit. Every decision names the version it was made on.
     version = Column(Integer, nullable=False, server_default=text("0"))
+    # Phase 6: the agent memories that moved this job up the triage order,
+    # {"boost", "memories": [...]}; NULL if none did (agent/memory.py).
+    memory_effects = Column(JSONB(none_as_null=True))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -414,6 +417,40 @@ class ApplicationAction(Base):
     status = Column(Text, nullable=False, server_default=text("'pending'"))
     external_id = Column(Text)                         # the Gmail draft id
     message_id = Column(Text)                          # RFC 5322 Message-ID
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now(), onupdate=func.now())
+
+
+MEMORY_KINDS = ("company_avoid", "title_avoid", "company_prefer", "title_prefer",
+                "location_prefer", "note")
+MEMORY_PROVENANCES = ("stated", "learned")
+MEMORY_UNIQUE_INDEX = "uq_agent_memories_user_kind_value"
+
+
+class AgentMemory(Base):
+    """A preference the agent was told (provenance 'stated', from the user)
+    or learned from the user's decisions ('learned', with its evidence).
+    Triage-only (backend/agent/memory.py): *_avoid excludes, *_prefer
+    boosts the triage order; scores and job_scores are never touched.
+    One per (user, kind, lower(value))."""
+    __tablename__ = "agent_memories"
+    __table_args__ = (
+        CheckConstraint(_in_list("kind", MEMORY_KINDS), name="agent_memories_kind_check"),
+        CheckConstraint(_in_list("provenance", MEMORY_PROVENANCES),
+                        name="agent_memories_provenance_check"),
+        Index(MEMORY_UNIQUE_INDEX, "user_id", "kind", text("lower(value)"), unique=True),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(Text, nullable=False)
+    value = Column(Text, nullable=False)
+    provenance = Column(Text, nullable=False)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    weight = Column(Numeric, nullable=False, server_default=text("1"))
+    active = Column(Boolean, nullable=False, server_default=text("true"))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -554,8 +591,17 @@ def _run_migrations(conn=None):
     conn.execute(text(
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS posting JSONB"))
     _migrate_phase5(conn)
+    _migrate_phase6(conn)
     if not event_type_check_is_current(_event_type_check_def(conn)):
         _replace_check(conn, "events", EVENT_TYPE_CHECK_NAME, event_type_check_sql())
+
+
+def _migrate_phase6(conn):
+    """Phase 6 on a Phase 5 database (each step checks first).
+    agent_memories is a new table: create_all() made it."""
+    # Which memories moved an application up the triage order.
+    conn.execute(text(
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS memory_effects JSONB"))
 
 
 def _migrate_phase5(conn):

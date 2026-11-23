@@ -126,7 +126,7 @@ _TASK_INDEXDEFS_SQL = """
 SELECT indexname, indexdef FROM pg_indexes
 WHERE schemaname = current_schema()
   AND tablename IN ('tasks', 'job_scores', 'applications', 'application_artifacts',
-                    'approvals', 'application_actions')
+                    'approvals', 'application_actions', 'agent_memories')
 ORDER BY indexname
 """
 # ...and their constraints (PK, FK with its ON DELETE, CHECKs).
@@ -135,7 +135,7 @@ SELECT c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)
 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
 WHERE t.relnamespace = current_schema()::regnamespace
   AND (t.relname IN ('tasks', 'job_scores', 'applications', 'application_artifacts',
-                     'approvals', 'application_actions')
+                     'approvals', 'application_actions', 'agent_memories')
        OR c.conname = 'events_source_check')
 ORDER BY 1, 2
 """
@@ -180,8 +180,9 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
 
     with pg.begin() as conn:
         conn.execute(text(
-            "DROP TABLE application_actions, approvals, application_artifacts, "
-            "applications, job_scores, events, canonical_jobs, users, tasks"))
+            "DROP TABLE agent_memories, application_actions, approvals, "
+            "application_artifacts, applications, job_scores, events, canonical_jobs, "
+            "users, tasks"))
     monkeypatch.setattr(db, "_initialized", False)
     db.init_db()
     with pg.connect() as conn:
@@ -199,6 +200,7 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     assert task_idx_from_orm == task_idx_from_sql
     assert db.TASK_CONCURRENCY_INDEX in dict(task_idx_from_sql)
     assert db.JOB_SCORES_LOOKUP_INDEX in dict(task_idx_from_sql)
+    assert db.MEMORY_UNIQUE_INDEX in dict(task_idx_from_sql)
     assert v2_cons_from_orm == v2_cons_from_sql
     assert ("job_scores", "job_scores_pkey",
             "PRIMARY KEY (job_id, profile_hash, cache_key)") in v2_cons_from_sql
@@ -218,6 +220,9 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
             ("application_actions", "application_actions_action_check"),
             ("application_actions", "application_actions_status_check"),
             ("events", "events_source_check"),
+            ("agent_memories", "agent_memories_kind_check"),
+            ("agent_memories", "agent_memories_provenance_check"),
+            ("agent_memories", "agent_memories_user_id_fkey"),
             } <= names
 
 
@@ -653,3 +658,57 @@ def test_approvals_and_actions_constraints(pg):
     with pg.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM approvals")).scalar() == 0
         assert conn.execute(text("SELECT count(*) FROM application_actions")).scalar() == 0
+
+
+# A database exactly as Phase 5 left it: today's schema.sql without the agent
+# memory table and without applications.memory_effects.
+PHASE5_SCHEMA = SCHEMA_SQL.read_text(encoding="utf-8").split(
+    "-- v2 agent memory (Phase 6")[0]
+
+
+def test_phase5_database_gains_agent_memories_idempotently(pg, monkeypatch):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(PHASE5_SCHEMA)
+        conn.execute(text("ALTER TABLE applications DROP COLUMN memory_effects"))
+        conn.execute(text("INSERT INTO users (email) VALUES ('u@x'), ('v@x')"))
+        conn.execute(text(
+            "INSERT INTO canonical_jobs (company, title, normalized_title) "
+            "VALUES ('acme', 'AI Engineer', 'ai engineer')"))
+        conn.execute(text(
+            "INSERT INTO applications (user_id, job_id, profile_hash, cache_key, "
+            "status, thread_id, version) VALUES (1, 1, 'p', 'k', 'awaiting_approval', "
+            "'application:1', 1)"))
+        assert conn.execute(text("SELECT to_regclass('agent_memories') IS NULL")).scalar()
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        assert conn.execute(text(
+            "SELECT memory_effects FROM applications WHERE id = 1")).scalar() is None
+
+    def memory(kind="company_avoid", value="Acme", user=1, provenance="stated"):
+        with pg.begin() as conn:
+            return conn.execute(text(
+                "INSERT INTO agent_memories (user_id, kind, value, provenance) "
+                "VALUES (:u, :k, :v, :p) RETURNING id"),
+                {"u": user, "k": kind, "v": value, "p": provenance}).scalar()
+
+    memory()
+    with pytest.raises(IntegrityError) as exc:
+        memory(value="ACME")                               # case-insensitive key
+    assert db.MEMORY_UNIQUE_INDEX in str(exc.value)
+    assert memory(kind="company_prefer", value="acme")     # another kind: fine
+    assert memory(user=2)                                  # another user: fine
+    for kind in db.MEMORY_KINDS:
+        memory(kind=kind, value=f"v-{kind}")
+    with pytest.raises(IntegrityError):
+        memory(kind="salary_floor", value="x")
+    with pytest.raises(IntegrityError):
+        memory(value="other", provenance="guessed")
+    with pg.connect() as conn:
+        row = conn.execute(text(
+            "SELECT evidence, weight, active FROM agent_memories WHERE id = 1")).one()
+    assert (row.evidence, float(row.weight), row.active) == ({}, 1.0, True)
+    with pg.begin() as conn:                               # FK cascades
+        conn.execute(text("DELETE FROM users WHERE id = 2"))
+    with pg.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM agent_memories WHERE user_id = 2")).scalar() == 0

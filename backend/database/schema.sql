@@ -1,5 +1,5 @@
 -- Schema: users, canonical_jobs, events, tasks, job_scores, applications,
--- application_artifacts, approvals, application_actions.
+-- application_artifacts, approvals, application_actions, agent_memories.
 --
 -- WHY canonical_jobs exists as a real table (not just JSON):
 -- events need to reference "this exact job" reliably. JSON list entries have
@@ -199,6 +199,10 @@ CREATE TABLE IF NOT EXISTS applications (
     -- application's. NULL: the job's own location matched. (Phase 5;
     -- Phase 4 databases get it via db.py:_run_migrations().)
     posting         JSONB,
+    -- Which agent memories changed this job's place in triage (Phase 6):
+    -- {"boost": n, "memories": [{id, kind, value, provenance, weight}]}.
+    -- NULL: none did. Its match_score is never changed by a memory.
+    memory_effects  JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT applications_user_id_job_id_key UNIQUE (user_id, job_id)
@@ -264,6 +268,38 @@ CREATE TABLE IF NOT EXISTS application_actions (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT application_actions_application_id_action_key UNIQUE (application_id, action)
 );
+
+-- v2 agent memory (Phase 6, backend/agent/memory.py): what the agent has
+-- been told or has learned about a user's preferences. TRIAGE ONLY: an
+-- active *_avoid memory keeps matching jobs out of triage, an active
+-- *_prefer memory moves matching jobs up the triage order by a bounded
+-- boost; neither ever changes a score, the score gate or job_scores.
+--   provenance 'stated'  from the user (API / Inbox), never overwritten by
+--                        learning
+--   provenance 'learned' derived from the user's approve/decline decisions
+--                        (deterministic thresholds, no LLM); evidence holds
+--                        the approvals and events behind it
+-- A deactivated memory has no effect and is never re-learned. Existing
+-- databases get this table from db.py:init_db() (create_all).
+CREATE TABLE IF NOT EXISTS agent_memories (
+    id              SERIAL PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL CONSTRAINT agent_memories_kind_check
+                        CHECK (kind IN ('company_avoid', 'title_avoid', 'company_prefer',
+                                        'title_prefer', 'location_prefer', 'note')),
+    value           TEXT NOT NULL,                     -- a company, title word(s), location or note
+    provenance      TEXT NOT NULL CONSTRAINT agent_memories_provenance_check
+                        CHECK (provenance IN ('stated', 'learned')),
+    evidence        JSONB NOT NULL DEFAULT '{}',       -- approvals / events behind it, decline reasons
+    weight          NUMERIC NOT NULL DEFAULT 1,        -- *_prefer: boost points; *_avoid: the count seen
+    active          BOOLEAN NOT NULL DEFAULT true,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One memory per (user, kind, value), case-insensitively.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_memories_user_kind_value
+    ON agent_memories (user_id, kind, lower(value));
 
 -- Not in this file: APScheduler's job store table (apscheduler_jobs), which
 -- the scheduler (python -m backend.scheduler) creates and owns, and
