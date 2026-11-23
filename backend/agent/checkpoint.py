@@ -19,11 +19,16 @@ deadlock against it.
 Graphs run with durability="sync" (DURABILITY): each step's checkpoint is
 committed before the next step starts, so a worker killed mid-node resumes
 from the node it was in, with everything before it already saved.
+
+thread_lock(application_id) serializes the tasks that drive one
+application's thread (its drafting task and its decision tasks): a
+session-level Postgres advisory lock, held for the whole graph run.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -35,6 +40,9 @@ DURABILITY = "sync"
 CHECKPOINT_TABLES = ("checkpoint_migrations", "checkpoints", "checkpoint_blobs",
                      "checkpoint_writes")
 CONNECT_TIMEOUT_S = 10
+# pg_try_advisory_lock(class, application_id): b"appt".
+APPLICATION_THREAD_LOCK_CLASS = 0x61707074
+THREAD_LOCK_WAIT_S = 30.0
 
 _setup_lock = threading.Lock()
 _setup_done = False
@@ -95,21 +103,62 @@ def run_thread(builder, thread_id: str, initial_state: dict) -> dict:
     has checkpoints:
 
       no checkpoint yet          -> invoke(initial_state)  (a first attempt)
+      paused at an interrupt()   -> the saved state with its "__interrupt__"
+                                    (it waits for Command(resume=...), which
+                                    only a decision gives; nothing re-runs)
       checkpoint, steps pending  -> invoke(None): resume at the pending node
                                     (a retry after a crash or an error)
       checkpoint, graph finished -> the saved final state, nothing re-runs
                                     (the worker died between the graph's
                                     end and recording the task's success)
 
-    Every step is checkpointed synchronously (DURABILITY)."""
+    A run that reaches an interrupt() returns its state with
+    "__interrupt__" set, as LangGraph's invoke() does. Every step is
+    checkpointed synchronously (DURABILITY)."""
     config = thread_config(thread_id)
     with open_checkpointer() as saver:
         graph = builder.compile(checkpointer=saver)
         if saver.get_tuple(config) is None:
             return graph.invoke(initial_state, config, durability=DURABILITY)
         snapshot = graph.get_state(config)
+        if snapshot.interrupts:
+            log.info("%s: paused at %s; waiting for a decision", thread_id,
+                     ", ".join(snapshot.next))
+            return {**snapshot.values, "__interrupt__": list(snapshot.interrupts)}
         if snapshot.next:
             log.info("%s: resuming at %s", thread_id, ", ".join(snapshot.next))
             return graph.invoke(None, config, durability=DURABILITY)
         log.info("%s: already finished; returning its final state", thread_id)
         return dict(snapshot.values)
+
+
+class ThreadBusy(RuntimeError):
+    """Another worker is driving this application's thread; the task is
+    retried with backoff."""
+
+
+@contextmanager
+def thread_lock(application_id: int, wait_s: float = THREAD_LOCK_WAIT_S) -> Iterator[None]:
+    """Hold the application's thread lock (a session-level advisory lock on
+    its own connection) for the block; ThreadBusy if another task holds it
+    for longer than wait_s. Unlocked before the connection goes back to
+    the pool, and released by Postgres if this process dies."""
+    from sqlalchemy import text
+    from ..database.db import get_engine, init_db
+    init_db()
+    params = {"c": APPLICATION_THREAD_LOCK_CLASS, "id": int(application_id)}
+    with get_engine().connect() as conn:
+        deadline = time.monotonic() + wait_s
+        while not conn.execute(text("SELECT pg_try_advisory_lock(:c, :id)"),
+                               params).scalar():
+            conn.rollback()
+            if time.monotonic() >= deadline:
+                raise ThreadBusy(f"application {application_id}: another task is "
+                                 "running its graph")
+            time.sleep(0.2)
+        conn.commit()
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:c, :id)"), params)
+            conn.commit()
