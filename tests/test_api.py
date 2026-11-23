@@ -198,11 +198,12 @@ MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 def test_every_mutating_route_requires_the_token(client, monkeypatch):
     """Black-box: with API_TOKEN set, every POST/PUT/PATCH/DELETE route
     answers 401 without the token -- including routes added later."""
-    from fastapi.routing import APIRoute
+    # The public API as OpenAPI describes it: stable across FastAPI versions
+    # (0.165 no longer flattens included routers into app.routes).
     monkeypatch.setenv("API_TOKEN", "s3cret")
     c, _ = client
-    routes = [(m, r.path) for r in app.routes if isinstance(r, APIRoute)
-              for m in sorted(r.methods & MUTATING)]
+    routes = [(method.upper(), path) for path, ops in app.openapi()["paths"].items()
+              for method in sorted(ops) if method.upper() in MUTATING]
     assert {p for _, p in routes} >= {
         "/v1/resumes", "/v1/profile", "/v1/rankings", "/v1/scans", "/v1/tracker/events",
         "/v1/agent/runs", "/v1/applications/{application_id}/decision"}
