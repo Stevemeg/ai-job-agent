@@ -203,3 +203,18 @@ def fake_llm(monkeypatch):
     yield fake_provider.CONTROL
     fake_provider.CONTROL.reset()
     provider.reset_provider()
+
+
+@pytest.fixture
+def agent_db(pg, monkeypatch):
+    """`pg`, with LangGraph's checkpointer (psycopg 3, its own connection)
+    pointed at the same throwaway schema: libpq reads PGOPTIONS for both
+    drivers. The checkpointer's once-per-process setup() is re-armed."""
+    from sqlalchemy import text
+    from backend.agent import checkpoint
+    with pg.connect() as conn:
+        schema = conn.execute(text("SELECT current_schema()")).scalar()
+    monkeypatch.setenv("PGOPTIONS", f"-csearch_path={schema}")
+    checkpoint.reset()
+    yield pg
+    checkpoint.reset()

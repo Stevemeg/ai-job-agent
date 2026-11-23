@@ -26,13 +26,15 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-    # The variable names backend/database/db.py already reads.
+    # The variable names backend/database/db.py already reads. No LLM
+    # network calls in CI: every generate() goes to the deterministic fake.
     env:
       DB_HOST: localhost
       DB_PORT: "5432"
       DB_USER: ai_job_agent
       DB_PASSWORD: ci_only_password
       DB_NAME: ai_job_agent
+      LLM_PROVIDER: fake
 
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +62,16 @@ jobs:
         # APScheduler 3.x (importorskip guards anything heavier). Full
         # requirements.txt (torch etc.) is not needed to validate the domain
         # logic: the ranking tests run the real matcher with the embedding
-        # similarity stubbed.
-        run: pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
+        # similarity stubbed. The agent tests need LangGraph and its
+        # checkpointer, at the versions requirements.txt pins.
+        run: |
+          pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
+          grep -E '^(langgraph|psycopg)' requirements.txt > /tmp/agent-requirements.txt
+          pip install -r /tmp/agent-requirements.txt
+
+      - name: Install the docx generators' Node deps
+        # The .docx rendering tests run the real generators.
+        run: npm ci --prefix backend/resume_engine --no-audit --no-fund
 
       - name: Unit tests
         run: pytest -q -rs -m "not db"

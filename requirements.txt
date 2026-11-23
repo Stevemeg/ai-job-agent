@@ -23,6 +23,15 @@ psycopg2-binary>=2.9
 # Scan scheduler (python -m backend.scheduler); 3.x: 4.0 is a rewrite
 apscheduler>=3.10,<4
 
+# Agent graph (backend/agent): LangGraph and its Postgres checkpointer,
+# pinned exactly (ADR-001: fast-moving). The checkpointer speaks psycopg 3;
+# the app itself stays on psycopg2 for now.
+langgraph==1.2.24
+langgraph-checkpoint==4.3.2
+langgraph-checkpoint-postgres==3.2.1
+psycopg[binary]==3.3.9
+psycopg-pool==3.3.3
+
 requests>=2.31
 httpx>=0.27
 
