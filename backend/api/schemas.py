@@ -163,6 +163,9 @@ class AgentRunResult(BaseModel):
     refresh: Optional[dict[str, Any]] = None   # the incremental rank's stats
     settings: Optional[dict[str, Any]] = None  # the AGENT_* values used
     triaged: int = 0
+    # Phase 6: jobs over the score gate that triage left out, by rule
+    # ({"location": n, "title": n, "memory": n})
+    excluded: dict[str, int] = Field(default_factory=dict)
     dispatched: list[DispatchedApplication] = Field(default_factory=list)
     skipped_existing: int = 0
 

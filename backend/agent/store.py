@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from ..database.db import APPLICATION_DONE_STATUSES, get_engine, init_db
 from .locations import LocationPolicy, job_eligibility
+from .titles import TitlePolicy
 
 APPLICATION_KIND = "application"
 APPLICATION_MAX_ATTEMPTS = 3
@@ -96,20 +97,27 @@ _TRIAGE = text("""
 
 def triage(*, user_id: int, profile_hash: str, cache_key: str,
            min_score: float, max_age_days: int, cap: int,
-           policy: LocationPolicy | None = None) -> list[dict]:
+           policy: LocationPolicy | None = None,
+           title_policy: TitlePolicy | None = None,
+           stats: dict | None = None) -> list[dict]:
     """The jobs to draft for, best first: scored for THIS profile under
     THIS cache key, passed the gates, score >= min_score, seen within
     max_age_days, no application yet, no applied/dismiss/declined event,
-    and in a location the policy accepts (locations.py; default: the
-    AGENT_LOCATIONS defaults, no global remote). Ties keep job id order.
-    At most `cap`.
+    in a location the policy accepts (locations.py; default: the
+    AGENT_LOCATIONS defaults, no global remote), and a title the seniority
+    filter keeps (titles.py; default: AGENT_EXCLUDE_TITLE_WORDS' default
+    list). Ties keep job id order. At most `cap`.
 
     Each candidate carries the posting its application will use
     (`posting`, None for the job's own location) and the resulting
-    `location` and `apply_link`."""
+    `location` and `apply_link`. `stats`, if given, gets how many jobs
+    over the score gate each rule left out ({"location": n, "title": n})."""
+    if stats is not None:
+        stats.update(location=0, title=0)
     if cap <= 0:
         return []
     policy = policy or LocationPolicy()
+    title_policy = title_policy or TitlePolicy()
     init_db()
     with get_engine().connect() as conn:
         rows = conn.execute(_TRIAGE, {
@@ -120,6 +128,12 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
         for r in rows:
             fit = job_eligibility(r["location"], r["postings"], policy)
             if not fit.eligible:
+                if stats is not None:
+                    stats["location"] += 1
+                continue
+            if not title_policy.keeps(r["title"]):
+                if stats is not None:
+                    stats["title"] += 1
                 continue
             posting = fit.posting or {}
             picked.append({

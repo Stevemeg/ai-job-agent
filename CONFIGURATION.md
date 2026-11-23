@@ -53,6 +53,7 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `AGENT_MAX_DRAFTS_PER_RUN` | env / `.env` (worker) | `5` | Triage: at most this many new applications per run (`0` drafts nothing) |
 | `AGENT_LOCATIONS` | env / `.env` (worker) | `Bengaluru, Bangalore, Hyderabad, Pune, Chennai, Mumbai, Gurgaon, Gurugram, Noida, Delhi, NCR, India` | Triage: comma-separated. A job's location, or one of its postings', must contain one of these as whole words (case and spacing ignored) |
 | `AGENT_ACCEPT_GLOBAL_REMOTE` | env / `.env` (worker) | `false` | Triage: `true` also accepts remote jobs that don't mention India (plain "Remote", "Remote - USA"). Remote jobs that mention India are always accepted |
+| `AGENT_EXCLUDE_TITLE_WORDS` | env / `.env` (worker) | `senior,sr,staff,principal,lead,manager,director,head,architect,vp,distinguished` | Triage: comma-separated. A job whose **title** contains one of these as a whole word (case-insensitive) is not drafted for. `none` turns the filter off. Scoring is unchanged |
 | `AGENT_APPROVAL_TTL_DAYS` | env / `.env` (worker) | `7` | An application nobody approves, edits or declines within this many days of its latest draft expires |
 | `GMAIL_CREDENTIALS_FILE` | env / `.env` (worker) | — | Path of a Google OAuth **Desktop app** client JSON. Gmail drafts are on only when this is set |
 | `GMAIL_TOKEN_FILE` | env / `.env` (worker) | `data/secrets/gmail_token.json` | Where the OAuth token is written and read (gitignored) |
@@ -70,7 +71,9 @@ SCAN_CRON="30 6 * * 1-5" SCAN_MISFIRE_GRACE_S=1800 DB_HOST=localhost python -m b
 
 The agent drafts a tailored resume and cover letter for the best new jobs. It never sends, uploads or submits anything (ADR-001). The worker reads the `AGENT_*` variables at the start of each run, so a changed `.env` takes effect on the next run without a restart. A malformed value fails the run with a clear error.
 
-Triage takes jobs that were scored for the **current** profile under the **current** scoring cache key, passed the hard gates, score at least `AGENT_MIN_SCORE`, were seen within `AGENT_MAX_JOB_AGE_DAYS`, have no application yet, have no `applied`, `dismiss` or `declined` event, and are in a location the agent may draft for. It takes the best `AGENT_MAX_DRAFTS_PER_RUN` of them.
+Triage takes jobs that were scored for the **current** profile under the **current** scoring cache key, passed the hard gates, score at least `AGENT_MIN_SCORE`, were seen within `AGENT_MAX_JOB_AGE_DAYS`, have no application yet, have no `applied`, `dismiss` or `declined` event, are in a location the agent may draft for, and have a title the seniority filter keeps. It takes the best `AGENT_MAX_DRAFTS_PER_RUN` of them.
+
+Seniority filter (triage only): a title is skipped when it contains one of `AGENT_EXCLUDE_TITLE_WORDS` as a whole word, case-insensitively. Punctuation and hyphens split words, so `"Senior Staff Software Engineer"`, `"Sr. ML Engineer"` and `"Tech-Lead"` are skipped, while `"Leading-edge AI Engineer"` (`leading` is not `lead`), `"Headless CMS Developer"` and `"AI Engineer"` are kept. The job's score and rank don't change; the agent just doesn't draft for it.
 
 Location rules (triage only; scoring and ranking never look at them): a location qualifies when it contains one of `AGENT_LOCATIONS` as whole words (`"Bengaluru, India"` contains `bengaluru`; `"Indianapolis"` doesn't contain `india`). A remote location (`remote`, `anywhere`, `worldwide`, `wfh`) qualifies only if it mentions India, or with `AGENT_ACCEPT_GLOBAL_REMOTE=true`. A job qualifies if its own location or any of its postings' does. When a posting qualifies, the application uses that posting's location and `apply_link`.
 

@@ -99,6 +99,7 @@ services:
       AGENT_LOCATIONS: ${AGENT_LOCATIONS:-}                # empty: the built-in Indian city list
       AGENT_ACCEPT_GLOBAL_REMOTE: ${AGENT_ACCEPT_GLOBAL_REMOTE:-false}
       AGENT_APPROVAL_TTL_DAYS: ${AGENT_APPROVAL_TTL_DAYS:-7}
+      AGENT_EXCLUDE_TITLE_WORDS: ${AGENT_EXCLUDE_TITLE_WORDS:-}  # empty: senior, sr, staff, ... ("none": off)
       # Gmail drafts (optional): e.g. /app/data/secrets/gmail_client.json,
       # after `python -m backend.integrations.gmail_auth` on the host.
       GMAIL_CREDENTIALS_FILE: ${GMAIL_CREDENTIALS_FILE:-}

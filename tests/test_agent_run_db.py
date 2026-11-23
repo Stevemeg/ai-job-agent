@@ -161,6 +161,40 @@ def test_the_cap_counts_eligible_jobs_only(pg, user):
     assert [c["title"] for c in _triage(user, cap=2)] == ["in0", "in1"]
 
 
+def test_triage_skips_seniority_titles_and_says_why(pg, user):
+    from backend.agent.titles import TitlePolicy
+    jobs = {"Senior Staff Software Engineer": _job("Senior Staff Software Engineer"),
+            "Sr. ML Engineer": _job("Sr. ML Engineer"),
+            "Leading-edge AI Engineer": _job("Leading-edge AI Engineer"),
+            "AI Engineer": _job("AI Engineer"),
+            "Lead Engineer, US": _job("Lead Engineer, US", location="Austin, TX")}
+    _seed(pg, {t: _spec(99 - i) for i, t in enumerate(jobs)}, jobs)
+    stats = {}
+    picked = store.triage(user_id=user, profile_hash=PROFILE_HASH, cache_key=CACHE_KEY,
+                          min_score=80, max_age_days=14, cap=50, stats=stats)
+    assert [c["title"] for c in picked] == ["Leading-edge AI Engineer", "AI Engineer"]
+    assert stats == {"location": 1, "title": 2}       # location is checked first
+    # The scores are untouched: the filter is triage-only.
+    with pg.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM job_scores WHERE passed")
+                            ).scalar() == 5
+    # No exclusions: every location-eligible job comes back, in score order.
+    assert [c["title"] for c in store.triage(
+        user_id=user, profile_hash=PROFILE_HASH, cache_key=CACHE_KEY, min_score=80,
+        max_age_days=14, cap=50, title_policy=TitlePolicy(()))] == [
+        "Senior Staff Software Engineer", "Sr. ML Engineer", "Leading-edge AI Engineer",
+        "AI Engineer"]
+
+
+def test_the_cap_counts_jobs_the_title_filter_keeps(pg, user):
+    jobs = {f"Senior {i}": _job(f"Senior {i}") for i in range(3)}
+    jobs.update({f"Engineer {i}": _job(f"Engineer {i}") for i in range(3)})
+    _seed(pg, {"Senior 0": _spec(99), "Senior 1": _spec(98), "Senior 2": _spec(97),
+               "Engineer 0": _spec(90), "Engineer 1": _spec(89), "Engineer 2": _spec(88)},
+          jobs)
+    assert [c["title"] for c in _triage(user, cap=2)] == ["Engineer 0", "Engineer 1"]
+
+
 def test_dispatch_records_the_posting_and_reads_use_it(pg, user):
     jobs = {"sf": _job("sf", location="San Francisco",
                        postings=[_posting("p9", "Gurugram")])}
@@ -249,6 +283,22 @@ def test_a_run_honours_agent_locations(agent_env, monkeypatch):
     assert "Pune" in task["result"]["settings"]["locations"]
     _, run, task = _run_agent(monkeypatch, AGENT_ACCEPT_GLOBAL_REMOTE="true")
     assert [d["title"] for d in task["result"]["dispatched"]] == ["AI Engineer US"]
+
+
+def test_a_run_honours_agent_exclude_title_words(agent_env, monkeypatch):
+    jd = "Build RAG pipelines with FAISS and LLMs."
+    corpus.upsert_jobs([{**_job("Senior AI Engineer"), "clean_description": jd},
+                        {**_job("AI Engineer"), "clean_description": jd},
+                        {**_job("AI Intern"), "clean_description": jd}])
+    _, run, task = _run_agent(monkeypatch)
+    assert run.outcome == "succeeded", run.error
+    assert sorted(d["title"] for d in task["result"]["dispatched"]) == ["AI Engineer",
+                                                                        "AI Intern"]
+    assert task["result"]["excluded"] == {"location": 0, "title": 1}
+    assert "senior" in task["result"]["settings"]["exclude_title_words"]
+    # A custom list replaces the default one.
+    _, run, task = _run_agent(monkeypatch, AGENT_EXCLUDE_TITLE_WORDS="intern")
+    assert [d["title"] for d in task["result"]["dispatched"]] == ["Senior AI Engineer"]
 
 
 def test_a_run_refreshes_triages_and_dispatches(agent_env, profile, monkeypatch):
