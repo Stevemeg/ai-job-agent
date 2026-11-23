@@ -23,6 +23,9 @@ from sqlalchemy.pool import NullPool              # noqa: E402
 from backend import scheduler                     # noqa: E402
 from backend.database import db                   # noqa: E402
 from backend.services import scan                 # noqa: E402
+# Bound at import, before the `enqueues` fixture swaps in its spy: a scan
+# enqueued through this is not one of "the scheduler's" enqueues.
+from backend.services.scan import request_scan as real_request_scan  # noqa: E402
 
 pytestmark = pytest.mark.db
 
@@ -229,12 +232,18 @@ def test_several_missed_slots_coalesce_into_one_run(pg, lock_key, enqueues):
 def test_a_slot_that_finds_a_scan_running_is_skipped(pg, lock_key, enqueues):
     cron = _quiet_cron()
     _seed(cron, lock_key)
-    manual = scan.request_scan({"trigger": "api"})          # holds scan:default
-    _set_next_run(_last_slot(cron))
+    # Enqueued past the spy, so `enqueues` holds only the scheduler's own
+    # attempt (the manual one would record None and satisfy a length check
+    # before the scheduler had fired at all).
+    manual = real_request_scan({"trigger": "api"})          # holds scan:default
+    slot = _last_slot(cron)
+    _set_next_run(slot)
     run = Running(cron=cron, lock_key=lock_key).start()
-    _wait(lambda: len(enqueues) == 1, what="the scheduled attempt")
+    _wait(lambda: any((k or "").startswith("scan:scheduled:") for k in enqueues),
+          what="the scheduled attempt")
     _wait(lambda: run.next_run() > datetime.now(UTC), what="the next slot")
     run.stop()
+    assert enqueues == [scheduler.scan_idempotency_key(slot)]
     assert [t.id for t in _scan_tasks(pg)] == [manual]      # logged and skipped
 
 
