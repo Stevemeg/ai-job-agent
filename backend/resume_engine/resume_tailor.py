@@ -9,6 +9,18 @@ Ollama locally -- auto-selected):
 Every rewritten bullet passes the deterministic hallucination validator
 before reaching generate_resume_docx.js, which produces the ATS-safe .docx.
 
+The pipeline is a chain of steps that can also be called one at a time
+(the agent graph, backend/agent/, runs each as its own checkpointed node):
+
+  extract_jd_requirements(jd_text, model)          1 LLM call
+  build_tailored_resume(profile, job, jd, model)   tailor + validate + assemble:
+      the CLI tailors with one call per project plus one for the skills;
+      given tailored=tailor_resume_single_call(...) (the agent's one call)
+      it makes none and only validates and assembles
+  render_resume_docx(content, output_path)         Node, no LLM
+
+tailor_to_job() chains them for the UI and the CLI, as before.
+
 Run from project root:
     python -m backend.resume_engine.resume_tailor --rank 1
     python -m backend.resume_engine.resume_tailor --rank 3 --model mistral
@@ -35,6 +47,15 @@ DOCX_SCRIPT = Path(__file__).resolve().parent / "generate_resume_docx.js"
 # layer raises LLMUnavailableError with a provider-appropriate message
 # (start Ollama / set GROQ_API_KEY).
 OllamaUnavailableError = LLMUnavailableError
+
+
+class DocxRenderError(RuntimeError):
+    """The Node docx generator ran and failed; .stderr is its full output
+    (the message carries the first 400 characters)."""
+
+    def __init__(self, message, stderr=""):
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def call_ollama(prompt, model=DEFAULT_MODEL):
@@ -142,45 +163,140 @@ Return this exact JSON structure (include ALL skills, just reordered):
     return skill_names  # fallback: original order
 
 
-def build_tailored_resume(profile, job, jd_requirements, model):
-    """Assemble the tailored resume content dict.
+def _original_bullets(description):
+    return [b.strip() for b in re.split("•", description or "") if b.strip()]
 
-    Returns (content_dict, validation_report) -- the report lists, per
-    project, whether the LLM output passed the truthfulness gate and which
-    terms were flagged, so UIs can show WHY a project fell back."""
-    print("  Tailoring project bullets...")
+
+def _answer_for(answered, titles, index):
+    """The entry of a one-call answer for project `index` (of `titles`): by
+    title first (case-insensitive), else by position -- unless the entry at
+    that position carries another project's title (never cross projects)."""
+    if not isinstance(answered, list):
+        return None
+    keys = [t.strip().lower() for t in titles]
+
+    def key(entry):
+        return str(entry.get("title", "")).strip().lower()
+    for entry in answered:
+        if isinstance(entry, dict) and key(entry) == keys[index]:
+            return entry
+    entry = answered[index] if index < len(answered) else None
+    if isinstance(entry, dict) and key(entry) not in keys:
+        return entry
+    return None
+
+
+def tailor_resume_single_call(profile, jd_requirements, model):
+    """The agent's tailoring step: ONE LLM call that rewrites every
+    project's bullets and orders the skills (the CLI makes one call per
+    project plus one for the skills). Same truthfulness rules as
+    tailor_project_bullets. Its output is not trusted: pass it to
+    build_tailored_resume(..., tailored=...), which runs it through the
+    same validator and fallbacks as the CLI's.
+
+    Returns {"bullets": [list of str, per profile project in order],
+             "ordered_skills": [every skill name]}. A project the answer
+    leaves out keeps its original bullets, and a skill list that is not
+    exactly the candidate's skills keeps the original order -- the CLI
+    steps' fallbacks. Without jd_requirements no call is made (as in the
+    CLI steps): originals throughout."""
+    projects = profile.get("projects", [])
     skill_names = [s["skill"] for s in profile.get("skills", [])]
-    tailored_projects = []
-    validation_report = []
-    for proj in profile["projects"]:
-        bullets = tailor_project_bullets(proj, jd_requirements, model)
-        if not isinstance(bullets, list):
-            bullets = [b.strip() for b in re.split("•", bullets) if b.strip()]
+    originals = [_original_bullets(p["description"]) for p in projects]
+    if not jd_requirements:
+        return {"bullets": originals, "ordered_skills": skill_names}
 
-        # Truthfulness gate: verify no tool/metric was hallucinated. If any
-        # bullet fails, fall back to the ORIGINAL bullets for that project --
-        # an untailored true resume beats a tailored fraudulent one.
-        result = validate_project(bullets, proj["description"], skill_names)
-        print_report(proj["title"], bullets, result)
-        flagged = sorted({f for b in result["bullets"]
-                          for f in b["flagged_terms"] + b["flagged_numbers"]})
-        validation_report.append({"project": proj["title"],
-                                  "ok": result["ok"], "flagged": flagged})
-        if not result["ok"]:
-            print(f"    -> Falling back to original bullets for '{proj['title']}'")
-            bullets = [b.strip() for b in re.split("•", proj["description"])
-                       if b.strip()]
+    keywords = jd_requirements.get("keywords_to_include", [])
+    responsibilities = jd_requirements.get("key_responsibilities", [])
+    must_have = jd_requirements.get("must_have_skills", [])
+    nice_to_have = jd_requirements.get("nice_to_have_skills", [])
+    projects_json = json.dumps([{"title": p["title"], "bullets": p["description"]}
+                                for p in projects], ensure_ascii=False)
 
-        tailored_projects.append({
-            "title": proj["title"],
-            "duration": proj.get("duration", ""),
-            "bullets": bullets,
-        })
+    prompt = f"""You are an expert resume coach. Rewrite the bullet points of EACH project below
+to better align with this job's requirements, while remaining 100% truthful, and
+reorder the candidate's skills to put the most relevant ones first.
 
-    print("  Ordering skills by relevance...")
-    ordered_skills = order_skills_for_role(profile["skills"], jd_requirements, model)
+STRICT RULES -- violations make the resume fraudulent:
+1. Do NOT add any tool, platform, technology, or company name not in that project's original bullets.
+   BAD: original says "PyTorch" -> you add "on Databricks" -> FRAUDULENT
+   BAD: original says "Ollama" -> you add "using LangChain" -> FRAUDULENT
+   GOOD: rephrase existing tools using JD's preferred terminology
+2. Do NOT invent achievements, metrics, or outcomes not in the original.
+3. ONLY mirror JD language where the ORIGINAL already demonstrates that capability.
+4. If a JD keyword has NO evidence in the original bullets, DO NOT include it.
+5. Never move a tool, metric, or claim from one project to another.
 
-    content = {
+What you CAN do:
+- Reorder information within a bullet for better impact
+- Replace weak verbs with stronger action verbs
+- Rephrase descriptions to echo JD terminology (e.g. "built" -> "deployed production-grade")
+- Emphasize metrics that already exist in the original
+
+Projects (JSON):
+{projects_json}
+
+JD keywords to mirror ONLY where genuinely supported by the original:
+{json.dumps(keywords)}
+
+JD key responsibilities:
+{json.dumps(responsibilities[:3])}
+
+Candidate skills: {json.dumps(skill_names)}
+JD must-have skills: {json.dumps(must_have)}
+JD nice-to-have skills: {json.dumps(nice_to_have)}
+
+Return this exact JSON structure -- one entry per project, in the same order,
+and ALL skills (just reordered):
+{{
+  "projects": [
+    {{"title": "project title",
+     "tailored_bullets": ["bullet 1 starting with action verb", "bullet 2 starting with action verb"]}}
+  ],
+  "ordered_skills": ["skill1", "skill2", "skill3"]
+}}"""
+    result = call_ollama(prompt, model)
+    answered = result.get("projects") if isinstance(result, dict) else None
+    bullets = []
+    for i, (proj, original) in enumerate(zip(projects, originals)):
+        entry = _answer_for(answered, [p["title"] for p in projects], i)
+        tailored = entry.get("tailored_bullets") if entry else None
+        if isinstance(tailored, list) and all(isinstance(b, str) for b in tailored):
+            tailored = [b.strip() for b in tailored if b.strip()]
+        bullets.append(tailored if isinstance(tailored, list) and tailored
+                       else original)
+    ordered = result.get("ordered_skills") if isinstance(result, dict) else None
+    if not (isinstance(ordered, list) and all(isinstance(x, str) for x in ordered)
+            and set(ordered) == set(skill_names)):
+        ordered = skill_names
+    return {"bullets": bullets, "ordered_skills": ordered}
+
+
+def validate_tailored_project(project, bullets, skill_names, *, verbose=True):
+    """The truthfulness gate for one project's tailored bullets: verify no
+    tool/metric was hallucinated. If any bullet fails, fall back to the
+    ORIGINAL bullets for that project -- an untailored true resume beats a
+    tailored fraudulent one.
+
+    Returns (bullets to use, {"project", "ok", "flagged"})."""
+    if not isinstance(bullets, list):
+        bullets = [b.strip() for b in re.split("•", bullets) if b.strip()]
+    result = validate_project(bullets, project["description"], skill_names)
+    if verbose:
+        print_report(project["title"], bullets, result)
+    flagged = sorted({f for b in result["bullets"]
+                      for f in b["flagged_terms"] + b["flagged_numbers"]})
+    entry = {"project": project["title"], "ok": result["ok"], "flagged": flagged}
+    if not result["ok"]:
+        if verbose:
+            print(f"    -> Falling back to original bullets for '{project['title']}'")
+        bullets = _original_bullets(project["description"])
+    return bullets, entry
+
+
+def assemble_resume_content(profile, job, jd_requirements, projects, ordered_skills):
+    """The content dict generate_resume_docx.js renders."""
+    return {
         "candidate": {
             "name": profile.get("name", ""),
             "email": profile.get("email", ""),
@@ -190,47 +306,100 @@ def build_tailored_resume(profile, job, jd_requirements, model):
         },
         "education": profile.get("education", []),
         "skills": ordered_skills,
-        "projects": tailored_projects,
+        "projects": projects,
         "target_role": job.get("title", ""),
         "target_company": job.get("company", ""),
         "jd_summary": jd_requirements.get("role_summary", "") if jd_requirements else "",
     }
+
+
+def build_tailored_resume(profile, job, jd_requirements, model, tailored=None,
+                          *, verbose=True):
+    """Assemble the tailored resume content dict.
+
+    Returns (content_dict, validation_report) -- the report lists, per
+    project, whether the LLM output passed the truthfulness gate and which
+    terms were flagged, so UIs can show WHY a project fell back.
+
+    tailored=None (the CLI and UI): one tailoring call per project, then
+    one skills-ordering call. tailored=tailor_resume_single_call(...) (the
+    agent): no LLM call here; its bullets and skill order are validated
+    and assembled the same way. verbose=False silences the console report."""
+    if verbose:
+        print("  Tailoring project bullets...")
+    skill_names = [s["skill"] for s in profile.get("skills", [])]
+    tailored_projects = []
+    validation_report = []
+    for i, proj in enumerate(profile["projects"]):
+        bullets = (tailored["bullets"][i] if tailored is not None
+                   else tailor_project_bullets(proj, jd_requirements, model))
+        bullets, entry = validate_tailored_project(proj, bullets, skill_names,
+                                                   verbose=verbose)
+        validation_report.append(entry)
+        tailored_projects.append({
+            "title": proj["title"],
+            "duration": proj.get("duration", ""),
+            "bullets": bullets,
+        })
+
+    if verbose:
+        print("  Ordering skills by relevance...")
+    ordered_skills = (tailored["ordered_skills"] if tailored is not None
+                      else order_skills_for_role(profile["skills"],
+                                                 jd_requirements, model))
+    content = assemble_resume_content(profile, job, jd_requirements,
+                                      tailored_projects, ordered_skills)
     return content, validation_report
 
 
-def _write_docx(content, output_path):
-    """Hand the content dict to the Node docx generator. Raises RuntimeError
-    on failure (node missing, generator error) instead of exiting."""
+def _run_node(script, payload, output_path):
+    """Run a docx generator on `payload` (written to a temp JSON file).
+    Returns the CompletedProcess; FileNotFoundError if node is not on PATH."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json',
                                      delete=False, encoding='utf-8') as tmp:
-        json.dump(content, tmp, ensure_ascii=False, indent=2)
+        json.dump(payload, tmp, ensure_ascii=False, indent=2)
         tmp_path = tmp.name
     try:
-        result = subprocess.run(
-            ["node", str(DOCX_SCRIPT), tmp_path, str(output_path)],
+        return subprocess.run(
+            ["node", str(script), tmp_path, str(output_path)],
             capture_output=True, text=True)
+    finally:
+        os.unlink(tmp_path)
+
+
+def render_resume_docx(content, output_path):
+    """Render the content dict to `output_path` with the Node docx
+    generator. Returns the path. Raises RuntimeError if node is missing and
+    DocxRenderError (a RuntimeError) if the generator fails."""
+    try:
+        result = _run_node(DOCX_SCRIPT, content, output_path)
     except FileNotFoundError:
         raise RuntimeError("Node.js not found -- .docx generation needs "
                            "node on PATH (see docs/DEVELOPER_GUIDE.md).")
-    finally:
-        os.unlink(tmp_path)
     if result.returncode != 0:
-        raise RuntimeError(f"docx generation failed: {result.stderr[:400]}")
+        raise DocxRenderError(f"docx generation failed: {result.stderr[:400]}",
+                              result.stderr)
+    return Path(output_path)
 
 
-def tailor_to_job(profile, job, jd_text, model=DEFAULT_MODEL):
+def default_resume_path(job):
+    """DATA_DIR/resume_<company>_<title>.docx -- the UI's and CLI's file."""
+    safe_company = re.sub(r'[^\w]', '_', (job.get('company') or 'company').lower())
+    safe_title = re.sub(r'[^\w]', '_', (job.get('title') or 'role').lower())[:30]
+    return DATA_DIR / f"resume_{safe_company}_{safe_title}.docx"
+
+
+def tailor_to_job(profile, job, jd_text, model=DEFAULT_MODEL, output_path=None):
     """Full tailoring pipeline for one job -- the entry point for the UI
-    and future API. Returns (docx_path, validation_report).
+    and future API. Returns (docx_path, validation_report). The .docx goes
+    to output_path, default default_resume_path(job).
 
     Raises OllamaUnavailableError (daemon down) or RuntimeError (docx)."""
     jd_requirements = extract_jd_requirements(jd_text or "", model)
     content, validation_report = build_tailored_resume(
         profile, job, jd_requirements, model)
-
-    safe_company = re.sub(r'[^\w]', '_', (job.get('company') or 'company').lower())
-    safe_title = re.sub(r'[^\w]', '_', (job.get('title') or 'role').lower())[:30]
-    output_path = DATA_DIR / f"resume_{safe_company}_{safe_title}.docx"
-    _write_docx(content, output_path)
+    output_path = Path(output_path) if output_path else default_resume_path(job)
+    render_resume_docx(content, output_path)
     return output_path, validation_report
 
 
