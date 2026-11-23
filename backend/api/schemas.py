@@ -141,6 +141,85 @@ class ScanStatus(BaseModel):
     result: Optional[ScanResult] = None     # set once state is done
 
 
+# ---- agent (Phase 4, dry run) -----------------------------------------------
+
+class DispatchedApplication(BaseModel):
+    application_id: int
+    task_id: int
+    job_id: int
+    match_score: float
+    title: Optional[str] = None
+    company: Optional[str] = None
+
+
+class AgentRunResult(BaseModel):
+    trigger: Optional[str] = None           # api | scan
+    scan_task_id: Optional[int] = None
+    formula_version: str
+    skipped: Optional[str] = None           # set when there was nothing to do
+    profile_hash: Optional[str] = None
+    cache_key: Optional[str] = None         # scoring cache key the run triaged under
+    refresh: Optional[dict[str, Any]] = None   # the incremental rank's stats
+    settings: Optional[dict[str, Any]] = None  # the AGENT_* values used
+    triaged: int = 0
+    dispatched: list[DispatchedApplication] = Field(default_factory=list)
+    skipped_existing: int = 0
+
+
+class AgentRunStatus(BaseModel):
+    state: str                     # idle | running | done | failed
+    detail: str = ""
+    task_id: Optional[int] = None
+    trigger: Optional[str] = None
+    scan_task_id: Optional[int] = None
+    attempts: int = 0
+    max_attempts: Optional[int] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    result: Optional[AgentRunResult] = None  # set once state is done
+
+
+class ApplicationSummary(BaseModel):
+    id: int
+    job_id: int
+    title: str
+    company: str
+    location: Optional[str] = None
+    apply_link: Optional[str] = None
+    status: str                    # queued | drafting | drafted | needs_review | failed
+    match_score: Optional[float] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApplicationArtifactInfo(BaseModel):
+    kind: str                      # resume_docx | cover_letter_docx | cover_letter_txt | jd_requirements
+    sha256: str
+    size_bytes: Optional[int] = None        # None: the file is gone from disk
+    created_at: datetime
+    download_url: str
+    report: Optional[Any] = None   # the validator's report for this file
+
+
+class ApplicationTask(BaseModel):
+    task_id: int
+    state: str
+    detail: str = ""
+    attempts: int
+    max_attempts: int
+
+
+class ApplicationDetail(ApplicationSummary):
+    profile_hash: str
+    cache_key: str
+    thread_id: str
+    validator: dict[str, Any] = Field(default_factory=dict)  # {"resume": ..., "cover_letter": ...}
+    artifacts: list[ApplicationArtifactInfo] = Field(default_factory=list)
+    task: Optional[ApplicationTask] = None
+
+
 # ---- tracker -----------------------------------------------------------------
 
 class EventCreate(BaseModel):

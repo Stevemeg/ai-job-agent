@@ -169,3 +169,15 @@ def test_scan_post_with_an_unreachable_database_is_503(client, monkeypatch):
     r = c.post("/v1/scans")
     assert r.status_code == 503
     assert "Database unavailable" in r.json()["detail"]
+
+
+# ---- /v1/agent and /v1/applications without a database -------------------------------
+
+def test_the_agent_endpoints_need_a_database(client):
+    c, _ = client
+    for method, path in (("post", "/v1/agent/runs"), ("get", "/v1/agent/runs/latest"),
+                         ("get", "/v1/applications"), ("get", "/v1/applications/1"),
+                         ("get", "/v1/applications/1/artifacts/resume_docx")):
+        r = getattr(c, method)(path)
+        assert r.status_code == 503, path
+        assert "DATABASE_URL" in r.json()["detail"]
