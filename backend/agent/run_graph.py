@@ -12,7 +12,10 @@ run_graph.py -- the agent run (Phase 4, DRY RUN): one LangGraph thread
   agent hasn't touched, in a location AGENT_LOCATIONS accepts and with a
   title AGENT_EXCLUDE_TITLE_WORDS doesn't exclude (store.triage,
   locations.py, titles.py; AGENT_* settings). A qualifying posting's
-  apply_link is the application's.
+  apply_link is the application's. Phase 6: first re-learns the user's
+  memories from their decisions, then applies the active ones (memory.py):
+  *_avoid leaves jobs out, *_prefer reorders what is left by a bounded
+  boost. Scores and the score gate never change.
 - dispatch: per job, ONE transaction creates the applications row and
   enqueues its "application" task (idempotency key "application:<id>").
   A re-run (a retried task resumes here) creates no duplicates:
@@ -54,6 +57,7 @@ class RunState(TypedDict, total=False):
     settings: dict
     candidates: list
     excluded: dict
+    memory: dict
     dispatched: list
     skipped_existing: int
 
@@ -75,14 +79,17 @@ def build_run_graph(ctx: Any = None):
                                                  "corpus_version")}}
 
     def triage(state: RunState) -> dict:
+        from . import memory
         s = agent_settings.settings_from_env()
+        learned = memory.learn_safely(state["user_id"], s)
+        memories = memory.MemorySet.load(state["user_id"], max_boost=s.memory_max_boost)
         excluded: dict = {}
         candidates = store.triage(
             user_id=state["user_id"], profile_hash=state["profile_hash"],
             cache_key=state["cache_key"], min_score=s.min_score,
             max_age_days=s.max_job_age_days, cap=s.max_drafts_per_run,
             policy=s.location_policy(), title_policy=s.title_policy(),
-            stats=excluded)
+            memories=memories, stats=excluded)
         log.info("agent run: %d job(s) triaged (score >= %g, seen within %dd, "
                  "in %s%s, cap %d; left out: %s)", len(candidates), s.min_score,
                  s.max_job_age_days, "/".join(s.locations),
@@ -90,7 +97,9 @@ def build_run_graph(ctx: Any = None):
                  s.max_drafts_per_run,
                  ", ".join(f"{n} by {k}" for k, n in excluded.items()) or "none")
         return {"candidates": candidates, "settings": s.as_dict(),
-                "excluded": excluded}
+                "excluded": excluded,
+                "memory": {"active": len(memories), "learned": learned,
+                           "boosted": sum(1 for c in candidates if c.get("memory_effects"))}}
 
     def dispatch(state: RunState) -> dict:
         dispatched, skipped = [], 0
@@ -101,13 +110,15 @@ def build_run_graph(ctx: Any = None):
                                   match_score=c["match_score"],
                                   profile_hash=state["profile_hash"],
                                   cache_key=state["cache_key"],
-                                  posting=c.get("posting"))
+                                  posting=c.get("posting"),
+                                  memory_effects=c.get("memory_effects"))
             if made is None:
                 skipped += 1               # already dispatched (a resumed run)
             else:
                 dispatched.append({**made, "title": c["title"],
                                    "company": c["company"],
-                                   "location": c.get("location")})
+                                   "location": c.get("location"),
+                                   "memory_effects": c.get("memory_effects")})
         return {"dispatched": dispatched, "skipped_existing": skipped}
 
     g = StateGraph(RunState)
@@ -144,6 +155,7 @@ def run_agent_run_task(payload: dict, ctx: Any = None) -> dict:
               "refresh": final["refresh"], "settings": final["settings"],
               "triaged": len(final["candidates"]),
               "excluded": final.get("excluded") or {},
+              "memory": final.get("memory"),
               "dispatched": final["dispatched"],
               "skipped_existing": final["skipped_existing"]}
     log.info("agent run %s: %d triaged, %d dispatched, %d already had an "

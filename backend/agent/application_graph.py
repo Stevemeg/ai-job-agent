@@ -436,6 +436,11 @@ def run_decision_task(payload: dict, ctx: Any = None) -> dict:
     with thread_lock(application_id):
         final, outcome = _resume(application_id, decision, ctx)
     app = store.get_application(application_id) or {}
+    learned = None
+    if decision["action"] in ("approve", "decline") and decision["source"] == "user" \
+            and app.get("user_id") is not None:
+        from . import memory              # Phase 6: learn from the decision (never raises)
+        learned = memory.learn_safely(app["user_id"])
     result = {"application_id": application_id, "approval_id": approval["id"],
               "decision": decision["action"], "decided_version": decision["version"],
               "outcome": outcome, "status": app.get("status"),
@@ -443,6 +448,8 @@ def run_decision_task(payload: dict, ctx: Any = None) -> dict:
               "state": "awaiting_approval" if final.get("__interrupt__") else "done"}
     if final.get("email"):
         result["email"] = final["email"]
+    if learned is not None:
+        result["learned"] = learned
     log.info("application %s: %s on version %d -> %s (%s)", application_id,
              decision["action"], decision["version"], result["status"], outcome)
     return result

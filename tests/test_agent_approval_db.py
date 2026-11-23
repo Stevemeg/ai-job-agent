@@ -257,6 +257,22 @@ def _paragraphs(app_id):
     return application_graph.current_state(app_id)["paragraphs"]
 
 
+def test_a_decline_teaches_the_agent_a_memory(agent_env, monkeypatch):
+    # Phase 6: the decision task learns from the decision it applied.
+    from backend.agent import memory
+    monkeypatch.setenv("AGENT_LEARN_COMPANY_DECLINES", "1")
+    app_id, _ = _draft(agent_env, monkeypatch)
+    _, task = _decide(app_id, "decline", reason="not this company")
+    assert task["result"]["learned"]["created"] >= 1
+    user = store.get_application(app_id)["user_id"]
+    [m] = memory.list_memories(user, kind="company_avoid")
+    assert (m["value"], m["provenance"], m["active"]) == ("TestCo", "learned", True)
+    assert m["evidence"]["decline_reasons"] == ["not this company"]
+    [ev] = m["evidence"]["declined"]
+    assert ev["application_id"] == app_id and ev["event_id"] is not None
+    assert agent_env.llm.calls.get("cover_letter", 0) == 0          # still no LLM
+
+
 def test_a_flagged_edit_needs_acknowledging(agent_env, monkeypatch):
     app_id, _ = _draft(agent_env, monkeypatch)
     new = _paragraphs(app_id)[:2] + [FLAGGED]

@@ -99,6 +99,7 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
            min_score: float, max_age_days: int, cap: int,
            policy: LocationPolicy | None = None,
            title_policy: TitlePolicy | None = None,
+           memories: Any = None,
            stats: dict | None = None) -> list[dict]:
     """The jobs to draft for, best first: scored for THIS profile under
     THIS cache key, passed the gates, score >= min_score, seen within
@@ -108,12 +109,20 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
     filter keeps (titles.py; default: AGENT_EXCLUDE_TITLE_WORDS' default
     list). Ties keep job id order. At most `cap`.
 
+    `memories` (a memory.MemorySet, Phase 6): a job an active *_avoid
+    memory matches is left out, and *_prefer memories add a bounded boost
+    to the ORDER key (match_score + boost) of the jobs that are left. The
+    boost only reorders jobs already over min_score; every candidate keeps
+    its real match_score.
+
     Each candidate carries the posting its application will use
-    (`posting`, None for the job's own location) and the resulting
-    `location` and `apply_link`. `stats`, if given, gets how many jobs
-    over the score gate each rule left out ({"location": n, "title": n})."""
+    (`posting`, None for the job's own location), the resulting
+    `location` and `apply_link`, and `memory_effects` (the boosting
+    memories, or None). `stats`, if given, gets how many jobs over the
+    score gate each rule left out ({"location": n, "title": n,
+    "memory": n})."""
     if stats is not None:
-        stats.update(location=0, title=0)
+        stats.update(location=0, title=0, memory=0)
     if cap <= 0:
         return []
     policy = policy or LocationPolicy()
@@ -124,8 +133,9 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
             "profile_hash": profile_hash, "cache_key": cache_key,
             "min_score": min_score, "max_age_days": max_age_days,
             "user_id": user_id, "excluding": list(EXCLUDING_EVENTS)}).mappings()
-        picked = []
-        for r in rows:
+        reorders = memories is not None and memories.reorders
+        picked = []                       # (order key, SQL position, candidate)
+        for position, r in enumerate(rows):
             fit = job_eligibility(r["location"], r["postings"], policy)
             if not fit.eligible:
                 if stats is not None:
@@ -136,15 +146,27 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
                     stats["title"] += 1
                 continue
             posting = fit.posting or {}
-            picked.append({
-                "job_id": r["job_id"], "match_score": float(r["match_score"]),
+            location = posting.get("location") or r["location"]
+            job = {"company": r["company"], "title": r["title"], "location": location}
+            effects = None
+            if memories is not None:
+                if memories.avoided_by(**job) is not None:
+                    if stats is not None:
+                        stats["memory"] += 1
+                    continue
+                effects = memories.effects(**job)
+            score = float(r["match_score"])
+            picked.append((score + (effects["boost"] if effects else 0.0), position, {
+                "job_id": r["job_id"], "match_score": score,
                 "title": r["title"], "company": r["company"],
-                "location": posting.get("location") or r["location"],
+                "location": location,
                 "apply_link": posting.get("apply_link") or r["apply_link"],
-                "location_match": fit.match, "posting": fit.posting})
-            if len(picked) >= cap:
-                break
-    return picked
+                "location_match": fit.match, "posting": fit.posting,
+                "memory_effects": effects}))
+            if not reorders and len(picked) >= cap:
+                break                     # SQL order is final: no need to read on
+    picked.sort(key=lambda p: (-p[0], p[1]))
+    return [c for _, _, c in picked[:cap]]
 
 
 # --------------------------------------------------------------------------
@@ -152,22 +174,25 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
 # --------------------------------------------------------------------------
 _INSERT_APPLICATION = text("""
     INSERT INTO applications (id, user_id, job_id, profile_hash, cache_key,
-                              match_score, status, thread_id, posting)
+                              match_score, status, thread_id, posting, memory_effects)
     SELECT n, :user_id, :job_id, :profile_hash, :cache_key, :match_score,
-           'queued', 'application:' || n, :posting
+           'queued', 'application:' || n, :posting, :memory_effects
     FROM (SELECT nextval(pg_get_serial_sequence('applications', 'id')) AS n) AS seq
     ON CONFLICT (user_id, job_id) DO NOTHING
     RETURNING id
-""").bindparams(bindparam("posting", type_=JSONB(none_as_null=True)))
+""").bindparams(bindparam("posting", type_=JSONB(none_as_null=True)),
+                bindparam("memory_effects", type_=JSONB(none_as_null=True)))
 
 
 def dispatch(*, user_id: int, job_id: int, match_score: float,
              profile_hash: str, cache_key: str,
-             posting: dict | None = None) -> dict | None:
+             posting: dict | None = None,
+             memory_effects: dict | None = None) -> dict | None:
     """Create the application and enqueue its "application" task (key
     "application:<id>") in ONE transaction: both commit or neither does.
     `posting`: the posting triage matched (its location and apply_link
-    become the application's), None for the job's own. None if (user,
+    become the application's), None for the job's own. `memory_effects`:
+    the memories that boosted it in triage (None: none). None if (user,
     job) already has an application."""
     from .. import taskqueue
     init_db()
@@ -175,7 +200,7 @@ def dispatch(*, user_id: int, job_id: int, match_score: float,
         application_id = conn.execute(_INSERT_APPLICATION, {
             "user_id": user_id, "job_id": job_id, "match_score": match_score,
             "profile_hash": profile_hash, "cache_key": cache_key,
-            "posting": posting}).scalar()
+            "posting": posting, "memory_effects": memory_effects}).scalar()
         if application_id is None:
             return None
         task_id = taskqueue.enqueue(
@@ -317,7 +342,7 @@ def persist(application_id: int, artifacts: dict[str, dict], *,
 _LIST = """
     SELECT a.id, a.user_id, a.job_id, a.status, a.match_score, a.profile_hash,
            a.cache_key, a.thread_id, a.error, a.needs_review, a.version,
-           a.created_at, a.updated_at, j.title, j.company,
+           a.memory_effects, a.created_at, a.updated_at, j.title, j.company,
            COALESCE(a.posting->>'location', j.location) AS location,
            COALESCE(a.posting->>'apply_link', j.apply_link) AS apply_link
     FROM applications a JOIN canonical_jobs j ON j.id = a.job_id

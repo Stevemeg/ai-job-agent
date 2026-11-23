@@ -24,6 +24,15 @@ every call (a changed .env takes effect with the next run, no restart).
                                       triage: comma-separated; a job whose title
                                       contains one as a whole word is skipped
                                       (titles.py). "none" turns the filter off
+  AGENT_MEMORY_MAX_BOOST      5       triage: the most a job's *_prefer memories
+                                      can add to its triage ORDER key (score
+                                      points; memory.py). Never to its score
+  AGENT_LEARN_COMPANY_DECLINES 2      learned company_avoid: declined this often,
+                                      never approved
+  AGENT_LEARN_TITLE_DECLINES  3       learned title_avoid: a title word declined
+                                      this often, never approved
+  AGENT_LEARN_PREFER_APPROVALS 2      learned *_prefer: approved this often, more
+                                      often than declined
 """
 from __future__ import annotations
 
@@ -47,6 +56,10 @@ class AgentSettings:
     accept_global_remote: bool = False
     approval_ttl_days: int = 7
     exclude_title_words: tuple[str, ...] = DEFAULT_EXCLUDE_TITLE_WORDS
+    memory_max_boost: float = 5.0
+    learn_company_declines: int = 2
+    learn_title_declines: int = 3
+    learn_prefer_approvals: int = 2
 
     def as_dict(self) -> dict:
         out = asdict(self)
@@ -128,4 +141,12 @@ def settings_from_env(env: dict | None = None) -> AgentSettings:
         approval_ttl_days=_number(env, "AGENT_APPROVAL_TTL_DAYS",
                                   defaults.approval_ttl_days, int, 1),
         exclude_title_words=_title_words(env, defaults.exclude_title_words),
+        memory_max_boost=_number(env, "AGENT_MEMORY_MAX_BOOST",
+                                 defaults.memory_max_boost, float, 0),
+        learn_company_declines=_number(env, "AGENT_LEARN_COMPANY_DECLINES",
+                                       defaults.learn_company_declines, int, 1),
+        learn_title_declines=_number(env, "AGENT_LEARN_TITLE_DECLINES",
+                                     defaults.learn_title_declines, int, 1),
+        learn_prefer_approvals=_number(env, "AGENT_LEARN_PREFER_APPROVALS",
+                                       defaults.learn_prefer_approvals, int, 1),
     )

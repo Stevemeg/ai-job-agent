@@ -151,6 +151,8 @@ class DispatchedApplication(BaseModel):
     title: Optional[str] = None
     company: Optional[str] = None
     location: Optional[str] = None          # the qualifying posting's, else the job's
+    # Phase 6: the memories that moved it up the triage order (None: none)
+    memory_effects: Optional[dict[str, Any]] = None
 
 
 class AgentRunResult(BaseModel):
@@ -166,6 +168,9 @@ class AgentRunResult(BaseModel):
     # Phase 6: jobs over the score gate that triage left out, by rule
     # ({"location": n, "title": n, "memory": n})
     excluded: dict[str, int] = Field(default_factory=dict)
+    # Phase 6: {"active": memories applied, "learned": learn() stats,
+    # "boosted": candidates a memory moved up}
+    memory: Optional[dict[str, Any]] = None
     dispatched: list[DispatchedApplication] = Field(default_factory=list)
     skipped_existing: int = 0
 
@@ -260,6 +265,8 @@ class ApplicationDetail(ApplicationSummary):
     packet: Optional[dict[str, Any]] = None  # packet.json, once approved
     actions: list[ApplicationActionInfo] = Field(default_factory=list)
     approvals: list[ApprovalRecord] = Field(default_factory=list)
+    # Phase 6: the memories that moved it up the triage order (None: none)
+    memory_effects: Optional[dict[str, Any]] = None
 
 
 class DecisionRequest(BaseModel):

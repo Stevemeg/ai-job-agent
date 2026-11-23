@@ -86,7 +86,8 @@ def test_triage_applies_score_age_profile_and_cache_key_and_orders_by_score(pg, 
     assert picked[0] == {"job_id": ids["H"], "match_score": 99.0, "title": "H",
                          "company": "acme", "location": "Bengaluru, India",
                          "apply_link": "https://x/H",
-                         "location_match": "listed_location", "posting": None}
+                         "location_match": "listed_location", "posting": None,
+                         "memory_effects": None}
     assert ids["T1"] < ids["T2"]                                   # ties: job id
 
 
@@ -173,7 +174,7 @@ def test_triage_skips_seniority_titles_and_says_why(pg, user):
     picked = store.triage(user_id=user, profile_hash=PROFILE_HASH, cache_key=CACHE_KEY,
                           min_score=80, max_age_days=14, cap=50, stats=stats)
     assert [c["title"] for c in picked] == ["Leading-edge AI Engineer", "AI Engineer"]
-    assert stats == {"location": 1, "title": 2}       # location is checked first
+    assert stats == {"location": 1, "title": 2, "memory": 0}   # location is checked first
     # The scores are untouched: the filter is triage-only.
     with pg.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM job_scores WHERE passed")
@@ -294,7 +295,7 @@ def test_a_run_honours_agent_exclude_title_words(agent_env, monkeypatch):
     assert run.outcome == "succeeded", run.error
     assert sorted(d["title"] for d in task["result"]["dispatched"]) == ["AI Engineer",
                                                                         "AI Intern"]
-    assert task["result"]["excluded"] == {"location": 0, "title": 1}
+    assert task["result"]["excluded"] == {"location": 0, "title": 1, "memory": 0}
     assert "senior" in task["result"]["settings"]["exclude_title_words"]
     # A custom list replaces the default one.
     _, run, task = _run_agent(monkeypatch, AGENT_EXCLUDE_TITLE_WORDS="intern")
