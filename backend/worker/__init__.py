@@ -24,7 +24,8 @@ the return value is stored as the task's result. Raising fails the attempt
 
 Dead handlers, `dead_handler(payload: dict, last_error: str | None)`, run
 once a task of their kind is dead: its final attempt raised, or a worker
-found its lease expired with no attempts left.
+found its lease expired with no attempts left. (The agent's "application"
+kind uses this to mark the application 'failed'.)
 """
 from __future__ import annotations
 
@@ -91,13 +92,20 @@ def make_worker_id() -> str:
 
 
 def default_handlers() -> dict[str, Handler]:
+    from ..agent.application_graph import run_application_task
+    from ..agent.run_graph import AGENT_RUN_KIND, run_agent_run_task
+    from ..agent.store import APPLICATION_KIND
     from ..services.ranking import RANK_KIND, run_rank_task
     from ..services.scan import SCAN_KIND, run_scan_task
-    return {RANK_KIND: run_rank_task, SCAN_KIND: run_scan_task}
+    return {RANK_KIND: run_rank_task, SCAN_KIND: run_scan_task,
+            AGENT_RUN_KIND: run_agent_run_task,
+            APPLICATION_KIND: run_application_task}
 
 
 def default_dead_handlers() -> dict[str, DeadHandler]:
-    return {}
+    from ..agent.application_graph import on_application_dead
+    from ..agent.store import APPLICATION_KIND
+    return {APPLICATION_KIND: on_application_dead}
 
 
 def _format_error(exc: BaseException) -> str:

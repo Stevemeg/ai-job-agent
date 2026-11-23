@@ -228,10 +228,12 @@ AGENT_ENV_VARS = ("AGENT_ENABLED", "AGENT_MIN_SCORE", "AGENT_MAX_JOB_AGE_DAYS",
 def agent_env(agent_db, fake_llm, rank_files, stub_semantic, tmp_path, monkeypatch):
     """Everything the agent graphs touch, isolated: the throwaway schema
     (with the checkpointer), the fake LLM, the profile and ranked file under
-    tmp_path, the embedding similarity stubbed, and the AGENT_* settings at
-    their defaults."""
+    tmp_path, the embedding similarity stubbed, data/applications/ under
+    tmp_path, and the AGENT_* settings at their defaults."""
     from types import SimpleNamespace
+    from backend.agent import application_graph
     apps = tmp_path / "applications"
+    monkeypatch.setattr(application_graph, "APPLICATIONS_DIR", apps)
     for var in AGENT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     return SimpleNamespace(pg=agent_db, llm=fake_llm, apps=apps,

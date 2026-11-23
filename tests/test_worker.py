@@ -61,9 +61,17 @@ def test_worker_rejects_an_empty_registry_and_bad_timings():
 
 
 def test_default_registry_is_keyed_by_task_kind():
+    from backend.agent import application_graph, run_graph
     from backend.services import scan
-    assert Worker().kinds == sorted([ranking.RANK_KIND, scan.SCAN_KIND])
-    assert Worker().handlers[scan.SCAN_KIND] is scan.run_scan_task
+    worker = Worker()
+    assert worker.kinds == sorted([ranking.RANK_KIND, scan.SCAN_KIND,
+                                   run_graph.AGENT_RUN_KIND, "application"])
+    assert worker.handlers[scan.SCAN_KIND] is scan.run_scan_task
+    assert worker.handlers["application"] is application_graph.run_application_task
+    assert worker.dead_handlers == {
+        "application": application_graph.on_application_dead}
+    # A worker for other kinds carries no dead handler it can't need.
+    assert Worker({"x": lambda p, c: None}).dead_handlers == {}
 
 
 # ---- the "rank" handler (no DB; the DB-backed tests are in test_rank_lock_db.py) --
