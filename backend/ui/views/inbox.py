@@ -15,6 +15,11 @@ wrong decision) and the worker applies it. Approving prepares the packet
 and at most a Gmail DRAFT; nothing is ever sent or submitted -- you apply
 yourself, from the apply link.
 
+Follow-ups due (Phase 6): applications you logged as applied
+AGENT_FOLLOW_UP_DAYS ago with no reply logged since, with the follow-up
+Gmail draft if one was made (never sent). Logging the reply in the
+Tracker takes one off the list.
+
 Memory (Phase 6): what the agent remembers about your preferences, stated
 by you or learned from your decisions, with the evidence behind each one.
 Edit, deactivate or delete them here (backend.agent.memory, the same
@@ -88,6 +93,21 @@ def memory_label(m: dict) -> str:
     if not m.get("active", True):
         parts.append("inactive")
     return " · ".join(parts)
+
+
+def follow_up_line(app: dict) -> str:
+    """One line for a due follow-up: the job and what was prepared."""
+    draft = app.get("follow_up_draft") or {}
+    if draft.get("status") == "done":
+        prepared = "a follow-up Gmail draft is ready (not sent)"
+    elif draft.get("status") == "pending":
+        prepared = "the follow-up Gmail draft is being created"
+    elif draft.get("status") == "failed":
+        prepared = "the follow-up Gmail draft failed"
+    else:
+        prepared = "no draft (no contact email in the posting, or Gmail is off)"
+    return (f"{app['title']} at {app['company']} ({app.get('location') or 'location n/a'})"
+            f" -- {prepared}")
 
 
 def evidence_lines(m: dict) -> list[str]:
@@ -245,6 +265,32 @@ def _card(app: dict) -> None:
                         _submit(app, "edit", edits=edits, acknowledge_flags=keep)
 
 
+def _load_follow_ups(profile: dict) -> list[dict]:
+    from backend.agent import followups, store
+    return followups.list_follow_ups_due(store.user_for_profile(profile))
+
+
+def _follow_ups_section(profile: dict) -> None:
+    try:
+        due = _load_follow_ups(profile)
+    except Exception as exc:                                # noqa: BLE001
+        st.caption(f"Follow-ups are unavailable ({exc.__class__.__name__}).")
+        return
+    if not due:
+        return
+    st.markdown("---")
+    st.markdown(f"#### Follow-ups due ({len(due)})")
+    st.markdown('<p class="uja-muted">You logged these as applied a while ago and no '
+                'reply since. Nothing was sent: send the draft yourself if you want to. '
+                'Logging the reply (interview, rejection, offer) in the Tracker takes '
+                'one off this list.</p>', unsafe_allow_html=True)
+    for app in due:
+        st.markdown(f'<span class="uja-pill amber">follow up</span> '
+                    f'{escape(follow_up_line(app))}', unsafe_allow_html=True)
+        if app.get("apply_link"):
+            st.link_button("Posting ↗", app["apply_link"])
+
+
 def _load_memories(profile: dict) -> tuple[int, list[dict]]:
     from backend.agent import memory, store
     user_id = store.user_for_profile(profile)
@@ -350,4 +396,5 @@ def render(profile: dict) -> None:
                     'POST /v1/agent/runs.</p>', unsafe_allow_html=True)
     for app in apps:
         _card(app)
+    _follow_ups_section(profile)
     _memory_section(profile)

@@ -73,6 +73,7 @@ def stubbed(monkeypatch):
     monkeypatch.setattr(decisions, "submit_decision", submit)
     from backend.ui.views import inbox
     monkeypatch.setattr(inbox, "_load_memories", lambda profile: (1, []))   # Phase 6
+    monkeypatch.setattr(inbox, "_load_follow_ups", lambda profile: [])
     return calls
 
 
@@ -236,3 +237,36 @@ def test_a_memory_error_is_shown_not_raised(memories, monkeypatch):
     at.text_input(key="mem-add-value").input("acme")
     at.button(key="FormSubmitter:mem-add-Remember").click().run(timeout=30)
     assert any("already have" in w.value for w in at.warning)
+
+
+# ---- Follow-ups due (Phase 6) --------------------------------------------------------
+
+DUE = [{"id": 4, "title": "AI Engineer", "company": "TestCo", "location": "Pune",
+        "apply_link": "https://x/4", "follow_up_draft": {"status": "done",
+                                                         "external_id": "r-1"}},
+       {"id": 5, "title": "ML Engineer", "company": "OtherCo", "location": None,
+        "apply_link": None, "follow_up_draft": None}]
+
+
+def test_follow_up_line():
+    pytest.importorskip("streamlit")
+    from backend.ui.views import inbox
+    assert inbox.follow_up_line(DUE[0]) == (
+        "AI Engineer at TestCo (Pune) -- a follow-up Gmail draft is ready (not sent)")
+    assert inbox.follow_up_line(DUE[1]) == (
+        "ML Engineer at OtherCo (location n/a) -- no draft (no contact email in the "
+        "posting, or Gmail is off)")
+    assert "failed" in inbox.follow_up_line({**DUE[0], "follow_up_draft": {"status": "failed"}})
+
+
+def test_the_inbox_lists_the_follow_ups_due(stubbed, monkeypatch):
+    from backend.ui.views import inbox
+    monkeypatch.setattr(inbox, "_load_follow_ups", lambda profile: list(DUE))
+    text = _markdown(_run())
+    assert "#### Follow-ups due (2)" in text
+    assert "AI Engineer at TestCo (Pune) -- a follow-up Gmail draft is ready" in text
+    assert text.index("Follow-ups due") < text.index("#### Memory")
+
+
+def test_no_follow_ups_due_shows_no_section(stubbed):
+    assert "Follow-ups due" not in _markdown(_run())
