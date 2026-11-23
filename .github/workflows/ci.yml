@@ -76,3 +76,40 @@ jobs:
             echo "::error::db-marked tests were skipped in CI"
             exit 1
           fi
+
+  # The worker renders .docx files with Node: build the real image and
+  # render a resume and a cover letter inside it.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t ai-job-agent:ci .
+
+      - name: Render both .docx files inside the image
+        run: |
+          docker run --rm -i -e LLM_PROVIDER=fake ai-job-agent:ci sh -c 'node --version && python -' <<'PY'
+          import zipfile
+          from pathlib import Path
+          from backend.resume_engine import cover_letter, resume_tailor
+          profile = {"name": "Image Check", "email": "c@example.com", "phone": "1",
+                     "skills": [{"skill": "RAG"}, {"skill": "FAISS"}],
+                     "education": [{"college": "X", "degree": "B.E.", "years": "2026"}],
+                     "projects": [{"title": "RAG Copilot", "duration": "2025",
+                                   "description": " • Built a RAG pipeline with FAISS."}]}
+          job = {"title": "AI Engineer", "company": "TestCo"}
+          jd = resume_tailor.extract_jd_requirements("RAG and FAISS.", None)
+          tailored = resume_tailor.tailor_resume_single_call(profile, jd, None)
+          content, _ = resume_tailor.build_tailored_resume(profile, job, jd, None,
+                                                           tailored=tailored, verbose=False)
+          out = Path("/tmp/render-check")
+          out.mkdir()
+          resume = resume_tailor.render_resume_docx(content, out / "resume.docx")
+          letter = cover_letter.render_cover_letter(["Hello TestCo."], out / "letter.docx",
+                                                    profile, job)
+          for path, needle in ((resume, "RAG Copilot"), (letter, "TestCo")):
+              with zipfile.ZipFile(path) as z:
+                  assert needle in z.read("word/document.xml").decode(), path
+              print(f"rendered {path} ({path.stat().st_size} bytes)")
+          PY

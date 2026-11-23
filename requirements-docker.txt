@@ -8,7 +8,8 @@
 # NOT included, by design:
 #   - ollama client needs: resume tailoring talks to Ollama over HTTP
 #     (host.docker.internal:11434); no Python package required.
-#   - Node/docx: document generation is CLI-only today and runs host-side.
+#   - Node/docx: the Dockerfile installs Node (apt) and runs `npm ci` in
+#     backend/resume_engine; no pip package is involved.
 
 # API
 fastapi>=0.110
