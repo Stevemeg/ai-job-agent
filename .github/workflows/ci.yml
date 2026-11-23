@@ -64,9 +64,10 @@ jobs:
         # logic: the ranking tests run the real matcher with the embedding
         # similarity stubbed. The agent tests need LangGraph and its
         # checkpointer, at the versions requirements.txt pins (its
-        # agent-pins block, transitive dependencies included).
+        # agent-pins block, transitive dependencies included). FastAPI and
+        # Starlette are pinned to the versions requirements.txt pins.
         run: |
-          pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
+          pip install sqlalchemy psycopg2-binary "fastapi==0.165.0" "starlette==1.10.0" httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
           sed -n '/^# agent-pins:begin/,/^# agent-pins:end/p' requirements.txt > /tmp/agent-requirements.txt
           pip install -r /tmp/agent-requirements.txt
           pip check

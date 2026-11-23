@@ -1,6 +1,11 @@
 streamlit>=1.35
 
-fastapi>=0.110
+# Pinned to the tested pair: FastAPI 0.165 needs starlette>=1.6 with no upper
+# bound, and a Starlette minor release changed how app.routes lists included
+# routers (Phase 5 CI). CI installs these exact versions too
+# (tests/test_requirements_pins.py checks all three places agree).
+fastapi==0.165.0
+starlette==1.10.0
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 

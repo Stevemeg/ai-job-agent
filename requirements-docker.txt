@@ -11,8 +11,9 @@
 #   - Node/docx: the Dockerfile installs Node (apt) and runs `npm ci` in
 #     backend/resume_engine; no pip package is involved.
 
-# API
-fastapi>=0.110
+# API -- the tested pair, as in requirements.txt and CI
+fastapi==0.165.0
+starlette==1.10.0
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9          # file uploads
 

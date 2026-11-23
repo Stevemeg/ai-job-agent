@@ -38,3 +38,32 @@ def test_nothing_else_names_a_langgraph_package_outside_the_block():
         text = (ROOT / name).read_text(encoding="utf-8")
         outside = text[:text.index(BEGIN)] + text[text.index(END):]
         assert not re.search(r"^(langgraph|langchain|langsmith)", outside, re.M), name
+
+
+# ---- the API framework (Phase 6): FastAPI + Starlette pinned everywhere -------
+
+API_PINS = ("fastapi", "starlette")
+
+
+def _pins(text):
+    return {m.group(1).lower(): m.group(2) for m in re.finditer(
+        r"(?m)^\s*\"?([A-Za-z][A-Za-z0-9_.\-]*)==([0-9][0-9A-Za-z.]*)\"?", text)}
+
+
+def _ci_install_pins():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    [line] = [ln for ln in ci.splitlines() if "pip install" in ln and "fastapi" in ln]
+    return dict(re.findall(r"\"?([A-Za-z][A-Za-z0-9_.\-]*)==([0-9][0-9A-Za-z.]*)\"?", line))
+
+
+def test_fastapi_and_starlette_are_pinned_identically_in_both_files_and_ci():
+    reqs = _pins((ROOT / "requirements.txt").read_text(encoding="utf-8"))
+    docker = _pins((ROOT / "requirements-docker.txt").read_text(encoding="utf-8"))
+    ci = {k.lower(): v for k, v in _ci_install_pins().items()}
+    for name in API_PINS:
+        assert name in reqs, f"{name} is not pinned exactly in requirements.txt"
+        assert docker.get(name) == reqs[name], name
+        assert ci.get(name) == reqs[name], name
+    for name in ("requirements.txt", "requirements-docker.txt"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert not re.search(r"(?m)^fastapi\s*>=", text), name
