@@ -3,7 +3,7 @@ dict shapes so engines can evolve without breaking clients."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -200,7 +200,8 @@ class ApplicationSummary(BaseModel):
 
 
 class ApplicationArtifactInfo(BaseModel):
-    kind: str                      # resume_docx | cover_letter_docx | cover_letter_txt | jd_requirements
+    # resume_docx | cover_letter_docx | cover_letter_txt | jd_requirements | packet
+    kind: str
     sha256: str
     size_bytes: Optional[int] = None        # None: the file is gone from disk
     created_at: datetime
@@ -216,6 +217,33 @@ class ApplicationTask(BaseModel):
     max_attempts: int
 
 
+class ApplicationActionInfo(BaseModel):
+    action: str                    # packet | gmail_draft
+    status: str                    # pending | done | failed
+    external_id: Optional[str] = None       # the Gmail draft id
+    message_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApprovalRecord(BaseModel):
+    id: int
+    decision: str                  # approve | decline | edit | expire
+    source: str                    # user | expiry
+    application_version: int
+    reason: Optional[str] = None
+    edits: Optional[dict[str, Any]] = None
+    decided_at: datetime
+
+
+class ApplicationDocuments(BaseModel):
+    """The reviewable text of the current version (from its checkpoint)."""
+    cover_letter_paragraphs: list[str] = Field(default_factory=list)
+    resume_projects: list[dict[str, Any]] = Field(default_factory=list)  # {title, bullets}
+    skills: list[str] = Field(default_factory=list)
+    edit_flags: list[dict[str, Any]] = Field(default_factory=list)       # acknowledged
+
+
 class ApplicationDetail(ApplicationSummary):
     profile_hash: str
     cache_key: str
@@ -223,6 +251,30 @@ class ApplicationDetail(ApplicationSummary):
     validator: dict[str, Any] = Field(default_factory=dict)  # {"resume": ..., "cover_letter": ...}
     artifacts: list[ApplicationArtifactInfo] = Field(default_factory=list)
     task: Optional[ApplicationTask] = None
+    # Phase 5 (approval gate)
+    match: Optional[dict[str, Any]] = None  # {score_breakdown, explanation: why-match, gaps}
+    documents: Optional[ApplicationDocuments] = None
+    packet: Optional[dict[str, Any]] = None  # packet.json, once approved
+    actions: list[ApplicationActionInfo] = Field(default_factory=list)
+    approvals: list[ApprovalRecord] = Field(default_factory=list)
+
+
+class DecisionRequest(BaseModel):
+    action: Literal["approve", "decline", "edit"]
+    version: int = Field(ge=1)     # the version you reviewed (optimistic concurrency)
+    reason: Optional[str] = Field(None, max_length=2000)
+    # action "edit": {"cover_letter_paragraphs": [...], "resume_bullets": {title: [...]}}
+    edits: Optional[dict[str, Any]] = None
+    acknowledge_flags: bool = False  # keep an edit the validator flags
+
+
+class DecisionAccepted(BaseModel):
+    approval_id: int
+    task_id: int                   # the application_decision task applying it
+    application_id: int
+    decision: str
+    version: int
+    source: str
 
 
 # ---- tracker -----------------------------------------------------------------

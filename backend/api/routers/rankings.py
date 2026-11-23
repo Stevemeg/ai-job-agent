@@ -14,10 +14,11 @@ an in-process thread:
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...config import RANKED_FILE
 from ...services import ranking
+from ..auth import require_token
 from ..deps import load_profile, load_ranked
 from ..schemas import RankedJob, RankingStatus
 
@@ -35,7 +36,7 @@ def _db_unavailable(exc: Exception) -> HTTPException:
                               "the ranking queue can't be reached.")
 
 
-@router.post("", response_model=RankingStatus, status_code=202)
+@router.post("", response_model=RankingStatus, status_code=202, dependencies=[Depends(require_token)])
 def start_ranking():
     if not ranking.queue_configured():
         raise HTTPException(503, NO_QUEUE_DETAIL)

@@ -316,14 +316,22 @@ def _application(row) -> dict:
     return out
 
 
+LIST_ORDERS = {
+    "newest": "a.created_at DESC, a.id DESC",
+    "score": "a.match_score DESC NULLS LAST, a.id",
+}
+
+
 def list_applications(*, status: str | None = None, limit: int = 50,
-                      offset: int = 0) -> list[dict]:
-    """Newest first."""
+                      offset: int = 0, sort: str = "newest") -> list[dict]:
+    """Newest first, or best score first (sort="score")."""
+    if sort not in LIST_ORDERS:
+        raise ValueError(f"sort must be one of {', '.join(LIST_ORDERS)}")
     sql, params = _LIST, {"limit": limit, "offset": offset}
     if status is not None:
         sql += " WHERE a.status = :status"
         params["status"] = status
-    sql += " ORDER BY a.created_at DESC, a.id DESC LIMIT :limit OFFSET :offset"
+    sql += f" ORDER BY {LIST_ORDERS[sort]} LIMIT :limit OFFSET :offset"
     init_db()
     with get_engine().connect() as conn:
         return [_application(r) for r in conn.execute(text(sql), params).mappings()]

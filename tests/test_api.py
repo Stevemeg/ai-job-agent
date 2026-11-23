@@ -181,3 +181,63 @@ def test_the_agent_endpoints_need_a_database(client):
         r = getattr(c, method)(path)
         assert r.status_code == 503, path
         assert "DATABASE_URL" in r.json()["detail"]
+
+
+def test_the_decision_endpoint_needs_a_database(client, monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1})
+    assert r.status_code == 503 and "DATABASE_URL" in r.json()["detail"]
+
+
+# ---- API_TOKEN ------------------------------------------------------------------------
+
+MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def test_every_mutating_route_requires_the_token():
+    from fastapi.routing import APIRoute
+    from backend.api.auth import require_token
+    api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
+    routes = [r for r in api_routes if r.methods & MUTATING]
+    assert {r.path for r in routes} >= {
+        "/v1/resumes", "/v1/profile", "/v1/rankings", "/v1/scans", "/v1/tracker/events",
+        "/v1/agent/runs", "/v1/applications/{application_id}/decision"}
+    for r in routes:
+        assert any(d.call is require_token for d in r.dependant.dependencies), r.path
+    reads = [r for r in api_routes if not (r.methods & MUTATING)]
+    assert all(not any(d.call is require_token for d in r.dependant.dependencies)
+               for r in reads)
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"},
+                                     {"Authorization": "s3cret"},
+                                     {"Authorization": "Basic s3cret"}])
+def test_with_api_token_set_a_missing_or_wrong_token_is_401(client, monkeypatch, headers):
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    for method, path, body in (
+            ("post", "/v1/applications/1/decision", {"action": "approve", "version": 1}),
+            ("post", "/v1/agent/runs", None), ("post", "/v1/rankings", None),
+            ("post", "/v1/scans", None), ("put", "/v1/profile", {})):
+        r = getattr(c, method)(path, json=body, headers=headers)
+        assert r.status_code == 401, (path, r.status_code)
+        assert r.headers["www-authenticate"] == "Bearer"
+
+
+def test_with_the_right_token_the_request_goes_through(client, monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1},
+               headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 503                      # past auth; no database here
+    assert c.get("/healthz").status_code == 200      # reads need no token
+    assert c.get("/v1/profile").status_code == 200
+
+
+def test_without_api_token_nothing_is_checked(client, monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1})
+    assert r.status_code == 503
+

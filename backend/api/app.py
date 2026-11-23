@@ -5,6 +5,10 @@ Run from project root:
     uvicorn backend.api.app:app --reload
 Interactive docs at http://localhost:8000/docs (auto-generated).
 
+Auth: with API_TOKEN set, every mutating endpoint needs "Authorization:
+Bearer <API_TOKEN>" (backend/api/auth.py). Without it the API is open, so
+never expose it beyond localhost / a private network without API_TOKEN.
+
 Versioning: everything under /v1 from day one. Score-formula changes bump
 `formula_version` here so clients can detect scoring regime changes -- the
 events table snapshots scores for the same reason.

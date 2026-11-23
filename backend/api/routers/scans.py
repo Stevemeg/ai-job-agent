@@ -11,9 +11,10 @@ enqueues every SCAN_CRON.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from ...services import ranking, scan
+from ..auth import require_token
 from ..schemas import ScanStatus
 
 router = APIRouter(prefix="/scans", tags=["scans"])
@@ -29,7 +30,7 @@ def _db_unavailable(exc: Exception) -> HTTPException:
                               "the scan queue can't be reached.")
 
 
-@router.post("", response_model=ScanStatus, status_code=202)
+@router.post("", response_model=ScanStatus, status_code=202, dependencies=[Depends(require_token)])
 def start_scan():
     if not ranking.queue_configured():
         raise HTTPException(503, NO_DB_DETAIL)
