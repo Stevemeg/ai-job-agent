@@ -5,13 +5,16 @@ log_impressions()  : call automatically every time rank_jobs() produces a
                       ranked list, so every job a user sees gets recorded.
 log_outcome()       : call manually (e.g. from a small CLI prompt or future
                       API endpoint) when something real happens -- applied,
-                      got an interview, rejected, offer.
+                      got an interview, rejected, offer. Phase 6: an
+                      'applied' for a job the agent has an application for
+                      also queues its follow-up, in the same transaction
+                      (agent/followups.py); a later outcome clears a due one.
 
 Both functions upsert the job into canonical_jobs first (insert if new,
 update last_seen_at if already known), so events always have a stable job_id
 to point to, regardless of how many times the same job gets re-scraped.
 """
-from .db import get_session, CanonicalJob, Event, VALID_EVENT_TYPES
+from .db import get_session, init_db, CanonicalJob, Event, VALID_EVENT_TYPES
 
 
 def _get_or_create_job(session, job_dict):
@@ -102,6 +105,9 @@ def log_outcome(user_id, company, title, event_type, match_score=None,
             f"'{event_type}' is not a valid event_type. Must be one of: {VALID_EVENT_TYPES}"
         )
 
+    # Schema first, outside the session: its migrations must never wait on
+    # locks this session's own writes hold (memoized: free after the first).
+    init_db()
     with get_session() as session:
         canonical = _get_or_create_job(session, {"company": company, "title": title})
         event = Event(
@@ -114,4 +120,7 @@ def log_outcome(user_id, company, title, event_type, match_score=None,
         )
         session.add(event)
         session.flush()
+        from ..agent.followups import on_event_logged
+        on_event_logged(session.connection(), user_id=user_id, job_id=canonical.id,
+                        event_id=event.id, event_type=event_type)
         return event.id

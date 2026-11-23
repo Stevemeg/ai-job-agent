@@ -194,6 +194,11 @@ def test_the_cap_counts_jobs_the_title_filter_keeps(pg, user):
                "Engineer 0": _spec(90), "Engineer 1": _spec(89), "Engineer 2": _spec(88)},
           jobs)
     assert [c["title"] for c in _triage(user, cap=2)] == ["Engineer 0", "Engineer 1"]
+    # The counts cover every job over the gate, not just those read before the cap.
+    stats = {}
+    store.triage(user_id=user, profile_hash=PROFILE_HASH, cache_key=CACHE_KEY,
+                 min_score=80, max_age_days=14, cap=1, stats=stats)
+    assert stats == {"location": 0, "title": 3, "memory": 0}
 
 
 def test_dispatch_records_the_posting_and_reads_use_it(pg, user):

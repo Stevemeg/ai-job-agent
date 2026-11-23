@@ -294,7 +294,7 @@ ARTIFACT_KINDS = ("resume_docx", "cover_letter_docx", "cover_letter_txt",
                   "jd_requirements", "packet")
 APPROVAL_DECISIONS = ("approve", "decline", "edit", "expire")
 APPROVAL_SOURCES = ("user", "expiry")
-ACTION_KINDS = ("packet", "gmail_draft")
+ACTION_KINDS = ("packet", "gmail_draft", "gmail_follow_up")
 ACTION_STATUSES = ("pending", "done", "failed")
 
 
@@ -337,6 +337,9 @@ class Application(Base):
     # Phase 6: the agent memories that moved this job up the triage order,
     # {"boost", "memories": [...]}; NULL if none did (agent/memory.py).
     memory_effects = Column(JSONB(none_as_null=True))
+    # Phase 6: 'applied' was logged AGENT_FOLLOW_UP_DAYS ago with no later
+    # outcome (agent/followups.py); a later outcome clears it.
+    follow_up_due = Column(Boolean, nullable=False, server_default=text("false"))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -396,10 +399,11 @@ class Approval(Base):
 
 
 class ApplicationAction(Base):
-    """What executing an approved application did: the 'packet' and at
-    most one 'gmail_draft' (never sent). The gmail_draft row is written
-    'pending' with its deterministic Message-ID before Gmail is called, so
-    a retry finds the draft instead of creating a second one."""
+    """What executing an approved application did: the 'packet', at most
+    one 'gmail_draft' and (Phase 6) one 'gmail_follow_up', none ever sent.
+    A Gmail row is written 'pending' with its deterministic Message-ID
+    before Gmail is called, so a retry finds the draft instead of creating
+    a second one."""
     __tablename__ = "application_actions"
     __table_args__ = (
         UniqueConstraint("application_id", "action",
@@ -602,6 +606,14 @@ def _migrate_phase6(conn):
     # Which memories moved an application up the triage order.
     conn.execute(text(
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS memory_effects JSONB"))
+    # Follow-ups: the due flag and the follow-up draft action.
+    conn.execute(text(
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS "
+        "follow_up_due BOOLEAN NOT NULL DEFAULT false"))
+    name = "application_actions_action_check"
+    if not check_allows_exactly(_check_def(conn, "application_actions", name),
+                                "action", ACTION_KINDS):
+        _replace_check(conn, "application_actions", name, _in_list("action", ACTION_KINDS))
 
 
 def _migrate_phase5(conn):

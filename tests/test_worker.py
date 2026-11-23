@@ -61,19 +61,22 @@ def test_worker_rejects_an_empty_registry_and_bad_timings():
 
 
 def test_default_registry_is_keyed_by_task_kind():
-    from backend.agent import application_graph, run_graph
+    from backend.agent import application_graph, followups, run_graph
     from backend.services import scan
     worker = Worker()
     assert worker.kinds == sorted([ranking.RANK_KIND, scan.SCAN_KIND,
                                    run_graph.AGENT_RUN_KIND, "application",
-                                   "application_decision", "approval_expiry"])
+                                   "application_decision", "approval_expiry",
+                                   "follow_up"])
     assert worker.handlers[scan.SCAN_KIND] is scan.run_scan_task
     assert worker.handlers["application"] is application_graph.run_application_task
     assert worker.handlers["application_decision"] is application_graph.run_decision_task
     assert worker.handlers["approval_expiry"] is application_graph.run_expiry_task
+    assert worker.handlers["follow_up"] is followups.run_follow_up_task
     assert worker.dead_handlers == {
         "application": application_graph.on_application_dead,
-        "application_decision": application_graph.on_decision_dead}
+        "application_decision": application_graph.on_decision_dead,
+        "follow_up": followups.on_follow_up_dead}
     # A worker for other kinds carries no dead handler it can't need.
     assert Worker({"x": lambda p, c: None}).dead_handlers == {}
 

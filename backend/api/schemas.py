@@ -205,6 +205,7 @@ class ApplicationSummary(BaseModel):
     updated_at: datetime
     needs_review: bool = False     # a validator flagged the current documents
     version: int = 0               # documents version; decisions name it
+    follow_up_due: bool = False    # Phase 6: applied N days ago, no reply logged
 
 
 class ApplicationArtifactInfo(BaseModel):
@@ -226,7 +227,7 @@ class ApplicationTask(BaseModel):
 
 
 class ApplicationActionInfo(BaseModel):
-    action: str                    # packet | gmail_draft
+    action: str                    # packet | gmail_draft | gmail_follow_up
     status: str                    # pending | done | failed
     external_id: Optional[str] = None       # the Gmail draft id
     message_id: Optional[str] = None

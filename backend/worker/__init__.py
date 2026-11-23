@@ -26,7 +26,7 @@ Dead handlers, `dead_handler(payload: dict, last_error: str | None)`, run
 once a task of their kind is dead: its final attempt raised, or a worker
 found its lease expired with no attempts left. (The agent's "application"
 kind uses this to mark the application 'failed'; "application_decision"
-to record why a decision could not be applied.)
+and "follow_up" to record why their step could not be done.)
 """
 from __future__ import annotations
 
@@ -96,6 +96,7 @@ def default_handlers() -> dict[str, Handler]:
     from ..agent.application_graph import (run_application_task, run_decision_task,
                                            run_expiry_task)
     from ..agent.decisions import DECISION_KIND
+    from ..agent.followups import FOLLOW_UP_KIND, run_follow_up_task
     from ..agent.run_graph import AGENT_RUN_KIND, run_agent_run_task
     from ..agent.store import APPLICATION_KIND, APPROVAL_EXPIRY_KIND
     from ..services.ranking import RANK_KIND, run_rank_task
@@ -104,14 +105,17 @@ def default_handlers() -> dict[str, Handler]:
             AGENT_RUN_KIND: run_agent_run_task,
             APPLICATION_KIND: run_application_task,
             DECISION_KIND: run_decision_task,
-            APPROVAL_EXPIRY_KIND: run_expiry_task}
+            APPROVAL_EXPIRY_KIND: run_expiry_task,
+            FOLLOW_UP_KIND: run_follow_up_task}
 
 
 def default_dead_handlers() -> dict[str, DeadHandler]:
     from ..agent.application_graph import on_application_dead, on_decision_dead
     from ..agent.decisions import DECISION_KIND
+    from ..agent.followups import FOLLOW_UP_KIND, on_follow_up_dead
     from ..agent.store import APPLICATION_KIND
-    return {APPLICATION_KIND: on_application_dead, DECISION_KIND: on_decision_dead}
+    return {APPLICATION_KIND: on_application_dead, DECISION_KIND: on_decision_dead,
+            FOLLOW_UP_KIND: on_follow_up_dead}
 
 
 def _format_error(exc: BaseException) -> str:

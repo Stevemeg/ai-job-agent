@@ -669,7 +669,12 @@ PHASE5_SCHEMA = SCHEMA_SQL.read_text(encoding="utf-8").split(
 def test_phase5_database_gains_agent_memories_idempotently(pg, monkeypatch):
     with pg.begin() as conn:
         conn.exec_driver_sql(PHASE5_SCHEMA)
-        conn.execute(text("ALTER TABLE applications DROP COLUMN memory_effects"))
+        conn.execute(text("ALTER TABLE applications DROP COLUMN memory_effects, "
+                          "DROP COLUMN follow_up_due"))
+        conn.execute(text(
+            "ALTER TABLE application_actions DROP CONSTRAINT application_actions_action_check, "
+            "ADD CONSTRAINT application_actions_action_check "
+            "CHECK (action IN ('packet', 'gmail_draft'))"))
         conn.execute(text("INSERT INTO users (email) VALUES ('u@x'), ('v@x')"))
         conn.execute(text(
             "INSERT INTO canonical_jobs (company, title, normalized_title) "
@@ -683,6 +688,16 @@ def test_phase5_database_gains_agent_memories_idempotently(pg, monkeypatch):
     with pg.connect() as conn:
         assert conn.execute(text(
             "SELECT memory_effects FROM applications WHERE id = 1")).scalar() is None
+        assert conn.execute(text(
+            "SELECT follow_up_due FROM applications WHERE id = 1")).scalar() is False
+    for action in db.ACTION_KINDS:                         # incl. gmail_follow_up
+        with pg.begin() as conn:
+            conn.execute(text("INSERT INTO application_actions (application_id, action) "
+                              "VALUES (1, :a)"), {"a": action})
+    with pytest.raises(IntegrityError):
+        with pg.begin() as conn:
+            conn.execute(text("INSERT INTO application_actions (application_id, action) "
+                              "VALUES (1, 'gmail_send')"))
 
     def memory(kind="company_avoid", value="Acme", user=1, provenance="stated"):
         with pg.begin() as conn:

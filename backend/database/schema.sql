@@ -203,6 +203,9 @@ CREATE TABLE IF NOT EXISTS applications (
     -- {"boost": n, "memories": [{id, kind, value, provenance, weight}]}.
     -- NULL: none did. Its match_score is never changed by a memory.
     memory_effects  JSONB,
+    -- A follow-up is due (Phase 6, agent/followups.py): you logged 'applied'
+    -- AGENT_FOLLOW_UP_DAYS ago and no later outcome. Logging one clears it.
+    follow_up_due   BOOLEAN NOT NULL DEFAULT false,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT applications_user_id_job_id_key UNIQUE (user_id, job_id)
@@ -250,8 +253,9 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 
 -- What executing an approved application did, one row per (application,
--- action): 'packet' (the application packet the human applies with) and
--- 'gmail_draft' (one Gmail draft, never sent). A gmail_draft row is
+-- action): 'packet' (the application packet the human applies with),
+-- 'gmail_draft' (one Gmail draft, never sent) and, Phase 6,
+-- 'gmail_follow_up' (one follow-up draft, never sent). A Gmail row is
 -- inserted 'pending' with its deterministic Message-ID BEFORE Gmail is
 -- called, so a retry finds an already-created draft by that Message-ID
 -- instead of creating a second one.
@@ -259,11 +263,11 @@ CREATE TABLE IF NOT EXISTS application_actions (
     id              SERIAL PRIMARY KEY,
     application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     action          TEXT NOT NULL CONSTRAINT application_actions_action_check
-                        CHECK (action IN ('packet', 'gmail_draft')),
+                        CHECK (action IN ('packet', 'gmail_draft', 'gmail_follow_up')),
     status          TEXT NOT NULL DEFAULT 'pending' CONSTRAINT application_actions_status_check
                         CHECK (status IN ('pending', 'done', 'failed')),
     external_id     TEXT,                              -- the Gmail draft id
-    message_id      TEXT,                              -- "<aja-<application_id>-<version>@ai-job-agent>"
+    message_id      TEXT,                              -- "<aja-<id>-<version>@ai-job-agent>", "<aja-followup-<id>@...>"
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT application_actions_application_id_action_key UNIQUE (application_id, action)

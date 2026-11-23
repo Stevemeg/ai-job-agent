@@ -133,7 +133,8 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
             "profile_hash": profile_hash, "cache_key": cache_key,
             "min_score": min_score, "max_age_days": max_age_days,
             "user_id": user_id, "excluding": list(EXCLUDING_EVENTS)}).mappings()
-        reorders = memories is not None and memories.reorders
+        # Every row is read, even past the cap: the order may still change
+        # (a *_prefer boost) and the exclusion counts cover every job.
         picked = []                       # (order key, SQL position, candidate)
         for position, r in enumerate(rows):
             fit = job_eligibility(r["location"], r["postings"], policy)
@@ -163,8 +164,6 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
                 "apply_link": posting.get("apply_link") or r["apply_link"],
                 "location_match": fit.match, "posting": fit.posting,
                 "memory_effects": effects}))
-            if not reorders and len(picked) >= cap:
-                break                     # SQL order is final: no need to read on
     picked.sort(key=lambda p: (-p[0], p[1]))
     return [c for _, _, c in picked[:cap]]
 
@@ -342,7 +341,8 @@ def persist(application_id: int, artifacts: dict[str, dict], *,
 _LIST = """
     SELECT a.id, a.user_id, a.job_id, a.status, a.match_score, a.profile_hash,
            a.cache_key, a.thread_id, a.error, a.needs_review, a.version,
-           a.memory_effects, a.created_at, a.updated_at, j.title, j.company,
+           a.memory_effects, a.follow_up_due, a.created_at, a.updated_at,
+           j.title, j.company,
            COALESCE(a.posting->>'location', j.location) AS location,
            COALESCE(a.posting->>'apply_link', j.apply_link) AS apply_link
     FROM applications a JOIN canonical_jobs j ON j.id = a.job_id

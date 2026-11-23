@@ -33,6 +33,9 @@ every call (a changed .env takes effect with the next run, no restart).
                                       this often, never approved
   AGENT_LEARN_PREFER_APPROVALS 2      learned *_prefer: approved this often, more
                                       often than declined
+  AGENT_FOLLOW_UP_DAYS        7       a follow-up is due this many days after
+                                      'applied' with no later outcome
+                                      (followups.py)
 """
 from __future__ import annotations
 
@@ -60,6 +63,7 @@ class AgentSettings:
     learn_company_declines: int = 2
     learn_title_declines: int = 3
     learn_prefer_approvals: int = 2
+    follow_up_days: int = 7
 
     def as_dict(self) -> dict:
         out = asdict(self)
@@ -149,4 +153,5 @@ def settings_from_env(env: dict | None = None) -> AgentSettings:
                                      defaults.learn_title_declines, int, 1),
         learn_prefer_approvals=_number(env, "AGENT_LEARN_PREFER_APPROVALS",
                                        defaults.learn_prefer_approvals, int, 1),
+        follow_up_days=_number(env, "AGENT_FOLLOW_UP_DAYS", defaults.follow_up_days, int, 1),
     )
