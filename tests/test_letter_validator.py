@@ -30,7 +30,7 @@ def _fixture_corpus(monkeypatch):
 
 def _flags(case):
     review = {r["paragraph"]: r["flags"] for r in cover_letter.letter_review(
-        case["paragraphs"], PROFILE, case["job"], letter_rules=True)}
+        case["paragraphs"], PROFILE, case["job"])}
     return [sorted(review.get(i, [])) for i in range(1, len(case["paragraphs"]) + 1)]
 
 
@@ -179,12 +179,14 @@ def test_the_result_has_the_bullet_validators_shape():
     assert r == {"ok": True, "flagged_terms": [], "flagged_numbers": []}
 
 
-def test_the_default_letter_review_still_uses_the_bullet_rules():
-    # The v1 UI (generate_for_job) and CLI keep their golden-pinned output.
+def test_every_letter_review_uses_the_letter_rules():
+    # One letter validator: the UI (generate_for_job), the CLI and the agent.
     job = {"title": "AI Engineer", "company": "acme"}
-    assert cover_letter.letter_review(["This works."], PROFILE, job) == [
-        {"paragraph": 1, "flags": ["This"]}]
-    assert cover_letter.letter_review(["This works."], PROFILE, job, letter_rules=True) == []
+    assert cover_letter.letter_review(["This works."], PROFILE, job) == []
+    assert cover_letter.letter_review(["This works at Google."], PROFILE, job) == [
+        {"paragraph": 1, "flags": ["Google"]}]
+    assert [r["flagged_terms"] for r in cover_letter.validate_letter(
+        ["Thank you."], PROFILE, job)] == [[]]
 
 
 def test_agent_edits_use_the_letter_rules():

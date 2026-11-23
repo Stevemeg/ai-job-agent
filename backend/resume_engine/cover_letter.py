@@ -15,15 +15,12 @@ Steps, callable one at a time (the agent graph runs each as its own node):
 
 generate_for_job() chains them (plus extract_jd_requirements) for the UI.
 
-Two rule sets for the truthfulness check (letter_rules=):
-  False  every paragraph goes through the resume-bullet validator
-         (validate_tailored.validate_bullet). The default, and what the UI's
-         generate_for_job() and this CLI use: their outputs are pinned by
-         the golden tests.
-  True   the cover-letter validator (letter_validator.py): sentence-starting
-         words and lower-case hyphenated words aren't flagged on their
-         capital or hyphen alone. The agent (Phase 6) uses it for drafts
-         and for edits.
+The truthfulness check is the cover-letter validator
+(letter_validator.py) for every letter -- the UI, this CLI and the agent's
+drafts, edits and follow-ups: sentence-starting words and lower-case
+hyphenated words aren't flagged on their capital or hyphen alone, known
+names that start a sentence are. Resume bullets keep the bullet validator
+(validate_tailored.validate_bullet).
 
 Run from project root:
     python -m backend.resume_engine.cover_letter --rank 1
@@ -39,7 +36,6 @@ from .resume_tailor import (call_ollama, extract_jd_requirements,
                             DEFAULT_MODEL, OllamaUnavailableError,
                             DocxRenderError, _run_node)
 from .letter_validator import validate_letter_paragraph
-from .validate_tailored import validate_bullet
 
 DOCX_SCRIPT = Path(__file__).resolve().parent / "generate_cover_letter_docx.js"
 
@@ -100,33 +96,27 @@ Return this exact JSON structure:
     return None
 
 
-def validate_letter(paragraphs, profile, letter_rules=False, job=None):
-    """Run each paragraph through the hallucination validator.
-
-    Company/role names are allowed (the letter must mention them), so they're
-    added to the allowed list by the caller. Returns list of per-paragraph
-    results. letter_rules=True uses the cover-letter validator
-    (letter_validator.py) instead of the resume-bullet one; `job` gives it
-    the target company.
+def validate_letter(paragraphs, profile, job=None):
+    """Run each paragraph through the cover-letter validator
+    (letter_validator.py). `job` gives it the target company, which a
+    letter may name. Role words are filtered by the caller (letter_review,
+    the CLI). Returns list of per-paragraph results.
     """
     evidence = _profile_evidence_text(profile)
     skills = [s["skill"] for s in profile.get("skills", [])]
-    if not letter_rules:
-        return [validate_bullet(p, evidence, skills) for p in paragraphs]
     target = (job or {}).get("company")
     return [validate_letter_paragraph(p, evidence, skills, target_company=target)
             for p in paragraphs]
 
 
-def letter_review(paragraphs, profile, job, letter_rules=False):
+def letter_review(paragraphs, profile, job):
     """The truthfulness review a reader acts on: [{"paragraph": n,
     "flags": [...]}] for each paragraph with unverified claims. Company and
-    role words are not flags (a letter must name them). letter_rules: see
-    the module docstring (the agent passes True)."""
+    role words are not flags (a letter must name them)."""
     expected = {(job.get("company") or "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title") or ""))}
     review = []
-    for i, r in enumerate(validate_letter(paragraphs, profile, letter_rules, job), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, job), 1):
         flags = ([t for t in r["flagged_terms"] if t.lower() not in expected]
                  + r["flagged_numbers"])
         if flags:
@@ -269,7 +259,7 @@ def main():
     expected = {job.get("company", "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title", "")))}
     any_real_flag = False
-    for i, r in enumerate(validate_letter(paragraphs, profile), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, job), 1):
         real_flags = [t for t in r["flagged_terms"] if t.lower() not in expected]
         if real_flags or r["flagged_numbers"]:
             any_real_flag = True

@@ -179,8 +179,7 @@ def _email_draft(app: dict, profile: dict, description: str | None, ctx: Any) ->
     if not gmail_auth.configured():
         return {"skipped": "Gmail is not configured (GMAIL_CREDENTIALS_FILE)"}
     review = cover_letter.letter_review(paragraphs_for(app), profile,
-                                        {"title": app["title"], "company": app["company"]},
-                                        letter_rules=True)
+                                        {"title": app["title"], "company": app["company"]})
     if review:
         return {"skipped": f"the follow-up text has validator flags: {review}"}
     from ..integrations import gmail

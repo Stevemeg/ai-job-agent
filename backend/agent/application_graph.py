@@ -17,7 +17,7 @@ Drafting (Phase 4), run by an "application" task:
 - The validators are the resume engine's: a flagged resume project falls
   back to its original bullets, a flagged letter paragraph is reported.
   Nothing is regenerated. Any flag sets needs_review. Letters use the
-  cover-letter rules (Phase 6, resume_engine/letter_validator.py); resume
+  cover-letter validator (resume_engine/letter_validator.py); resume
   bullets the unchanged bullet validator.
 - render writes data/applications/<application_id>/ (resume.docx,
   cover_letter.docx, cover_letter.txt, jd_requirements.json) -- never the
@@ -163,7 +163,7 @@ def build_application_graph(ctx: Any = None):
 
     def validate_letter(state: AppState) -> dict:
         return {"letter_review": cover_letter.letter_review(
-            state["paragraphs"], state["profile"], state["job"], letter_rules=True)}
+            state["paragraphs"], state["profile"], state["job"])}
 
     def render(state: AppState) -> dict:
         lease()

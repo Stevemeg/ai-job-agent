@@ -11,7 +11,7 @@ Edits (JSON):
    "resume_bullets": {"<project title>": ["...", ...]}} per project
 
 Either key or both. Paragraphs are validated with the cover-letter
-validator (letter rules, as drafts are; company and role words are fine),
+validator (as drafts are; company and role words are fine),
 bullets with the resume validator against that project's original
 description. A flag is
 reported only for text the edit changed.
@@ -105,7 +105,7 @@ def apply_edits(state: dict, edits) -> EditResult:
         new = edits["cover_letter_paragraphs"]
         old = [" ".join(p.split()) for p in paragraphs]
         edited = [i for i, p in enumerate(new, 1) if i > len(old) or p != old[i - 1]]
-        review = cover_letter.letter_review(new, profile, job, letter_rules=True)
+        review = cover_letter.letter_review(new, profile, job)
         flags += [{"document": "cover_letter", "paragraph": r["paragraph"],
                    "flags": r["flags"]} for r in review if r["paragraph"] in edited]
         if new != old:
