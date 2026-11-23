@@ -1,0 +1,20 @@
+Loading ranked list from <DATA>/ranked_jobs.json...
+
+Tailoring resume for: Computer Vision Engineer @ VisionCo
+Match score: 71.0
+Strong matches: ['GANs']
+
+Tailoring (JD analysis -> bullets -> validation -> docx)...
+  Tailoring project bullets...
+  [OK] RAG Medical Copilot: all bullets verified against original
+  [FLAGGED] GAN Image Synthesizer:
+    Bullet: Scaled training on Databricks to 50,000 images....
+      Unverified terms: ['Databricks', 'Scaled']
+      Unverified numbers: ['50000']
+    -> Falling back to original bullets for 'GAN Image Synthesizer'
+  Ordering skills by relevance...
+
+Note: 1 project(s) fell back to original bullets (fabrications caught by the validator).
+
+Done! Resume saved to: <DATA>/resume_visionco_computer_vision_engineer.docx
+Open in Word, review the tailored bullets, then submit.

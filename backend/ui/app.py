@@ -7,7 +7,10 @@ because multipage lists every page in the sidebar and would break the
 
     landing  -> upload + parse resume -> dashboard
     dashboard -> tabs: Overview | Skills | Skill Gaps | Suggestions |
-                       Career Paths | Jobs
+                       Career Paths | Jobs | [Inbox] | Tracker
+
+The Inbox (the agent's applications awaiting approval) only appears when
+Postgres is configured and reachable: the DB-less demo never shows it.
 
 This file only routes and holds layout chrome. Analysis math lives in
 backend/analysis; rendering lives in backend/ui/views; styling in theme.py.
@@ -29,7 +32,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.config import PROFILE_FILE, JOBS_FILE, SAMPLE_JOBS_FILE  # noqa: E402
+from backend.config import PROFILE_FILE                           # noqa: E402
+from backend.database.corpus import db_available, load_corpus_snapshot  # noqa: E402
 from backend.ui import theme                                      # noqa: E402
 from backend.ui.views import landing, review, analysis, jobs, tracker  # noqa: E402
 
@@ -48,22 +52,9 @@ def _load_profile() -> dict | None:
         return json.load(f)
 
 
-def _active_jobs_file() -> Path | None:
-    # Full corpus (JOBS_FILE) is gitignored -- local/self-hosted only.
-    # Deployed instances fall back to the small committed sample corpus.
-    if JOBS_FILE.exists():
-        return JOBS_FILE
-    if SAMPLE_JOBS_FILE.exists():
-        return SAMPLE_JOBS_FILE
-    return None
-
-
-def _load_jobs() -> list[dict]:
-    jobs_file = _active_jobs_file()
-    if jobs_file is None:
-        return []
-    with open(jobs_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+# Jobs come from the single corpus loader (backend/database/corpus.py):
+# Postgres when configured and reachable, else the gitignored full corpus
+# (local/self-hosted), else the small committed sample corpus (deployments).
 
 
 # ---- routing ----------------------------------------------------------------
@@ -100,17 +91,19 @@ with st.sidebar:
 
 # ---- dashboard ---------------------------------------------------------------
 
-all_jobs = _load_jobs()
-_active_file = _active_jobs_file()
-jobs_mtime = _active_file.stat().st_mtime if _active_file else 0.0
-results = analysis.cached_analysis(profile, jobs_mtime, all_jobs)
+corpus = load_corpus_snapshot()
+all_jobs = corpus.jobs
+results = analysis.cached_analysis(profile, corpus.version, all_jobs)
 
 analysis.render_hero(profile, results)
 
-(tab_overview, tab_skills, tab_gaps, tab_suggest, tab_careers, tab_jobs,
- tab_tracker) = st.tabs(
+inbox_on = db_available()          # DB mode only; the demo's tabs are unchanged
+tabs = st.tabs(
     ["Overview", "Skills", "Skill Gaps", "Suggestions", "Career Paths",
-     f"Jobs ({len(all_jobs):,})" if all_jobs else "Jobs", "Tracker"])
+     f"Jobs ({len(all_jobs):,})" if all_jobs else "Jobs"]
+    + (["Inbox"] if inbox_on else []) + ["Tracker"])
+tab_overview, tab_skills, tab_gaps, tab_suggest, tab_careers, tab_jobs = tabs[:6]
+tab_tracker = tabs[-1]
 
 with tab_overview:
     analysis.render_overview(profile, results["health"])
@@ -124,5 +117,9 @@ with tab_careers:
     analysis.render_careers(results["careers"])
 with tab_jobs:
     jobs.render(profile)
+if inbox_on:
+    from backend.ui.views import inbox
+    with tabs[6]:
+        inbox.render(profile)
 with tab_tracker:
     tracker.render(profile)

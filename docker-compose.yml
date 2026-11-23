@@ -1,6 +1,8 @@
-# Full stack: PostgreSQL + FastAPI + Streamlit.
+# Full stack: PostgreSQL + FastAPI + Streamlit + the task worker + the scan scheduler.
 #
 #   docker compose up --build
+#   # first run only: seed the DB corpus the worker ranks against
+#   docker compose exec api python -m backend.database.corpus import data/sample_jobs.json
 #
 #   UI:   http://localhost:8501
 #   API:  http://localhost:8000/docs
@@ -9,6 +11,11 @@
 # ./data and ./uploads are bind-mounted, so profiles, corpora, and rankings
 # are shared between containers AND with host-side CLI runs (resume tailoring
 # via Ollama still runs on the host -- it needs the Ollama daemon).
+#
+# Rankings run on the worker: the API and UI only enqueue "rank" tasks in
+# Postgres, and the worker is the single writer of data/ranked_jobs.json.
+# The scheduler enqueues a "scan" (collect -> upsert -> incremental rank)
+# every SCAN_CRON (default 09:00 IST); the worker runs that too.
 #
 # The old backend/database/docker-compose.yml still works standalone for
 # DB-only local development; this file is the one-command full stack.
@@ -41,6 +48,11 @@ services:
       DB_USER: ${DB_USER:-ai_job_agent}
       DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
       DB_NAME: ${DB_NAME:-ai_job_agent}
+      # Bearer token for the mutating endpoints (decisions included). Set it
+      # before the API is reachable by anyone but you; reads stay open.
+      API_TOKEN: ${API_TOKEN:-}
+      # Logging 'applied' (POST /v1/tracker/events) schedules the follow-up.
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
     ports:
       - "8000:8000"
     volumes:
@@ -56,6 +68,79 @@ services:
       timeout: 5s
       retries: 5
 
+  # Durable task worker (ADR-001 §2): claims queued tasks from Postgres with
+  # SKIP LOCKED, heartbeats its lease, and retries failures with backoff.
+  # Same image as api/ui. It refuses to start without a reachable DB.
+  # `docker compose stop` sends SIGTERM: the worker stops claiming and lets
+  # the current task finish within --grace. stop_grace_period must be longer
+  # than that, or Docker SIGKILLs it first (the task is then retried by the
+  # next worker once its lease expires).
+  #
+  # It also runs the agent's tasks: "agent_run" and "application" (drafts
+  # under data/applications/), and "application_decision" / "approval_expiry"
+  # (Phase 5: applies your approve/edit/decline; approving builds a packet
+  # and, with GMAIL_CREDENTIALS_FILE set, ONE Gmail draft -- never sent,
+  # never submitted). Drafting needs an LLM: set GROQ_API_KEY in .env (host
+  # Ollama isn't reachable from containers). AGENT_ENABLED=true makes every
+  # scan chain an agent run.
+  worker:
+    build: .
+    restart: unless-stopped
+    command: python -m backend.worker --grace 30
+    environment:
+      DB_HOST: db
+      DB_USER: ${DB_USER:-ai_job_agent}
+      DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
+      DB_NAME: ${DB_NAME:-ai_job_agent}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      AGENT_ENABLED: ${AGENT_ENABLED:-false}
+      AGENT_MIN_SCORE: ${AGENT_MIN_SCORE:-20}
+      AGENT_MAX_JOB_AGE_DAYS: ${AGENT_MAX_JOB_AGE_DAYS:-14}
+      AGENT_MAX_DRAFTS_PER_RUN: ${AGENT_MAX_DRAFTS_PER_RUN:-5}
+      AGENT_LOCATIONS: ${AGENT_LOCATIONS:-}                # empty: the built-in Indian city list
+      AGENT_ACCEPT_GLOBAL_REMOTE: ${AGENT_ACCEPT_GLOBAL_REMOTE:-false}
+      AGENT_APPROVAL_TTL_DAYS: ${AGENT_APPROVAL_TTL_DAYS:-7}
+      AGENT_EXCLUDE_TITLE_WORDS: ${AGENT_EXCLUDE_TITLE_WORDS:-}  # empty: senior, sr, staff, ... ("none": off)
+      AGENT_MEMORY_MAX_BOOST: ${AGENT_MEMORY_MAX_BOOST:-5}
+      AGENT_LEARN_COMPANY_DECLINES: ${AGENT_LEARN_COMPANY_DECLINES:-2}
+      AGENT_LEARN_TITLE_DECLINES: ${AGENT_LEARN_TITLE_DECLINES:-3}
+      AGENT_LEARN_PREFER_APPROVALS: ${AGENT_LEARN_PREFER_APPROVALS:-2}
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
+      # Gmail drafts (optional): e.g. /app/data/secrets/gmail_client.json,
+      # after `python -m backend.integrations.gmail_auth` on the host.
+      GMAIL_CREDENTIALS_FILE: ${GMAIL_CREDENTIALS_FILE:-}
+      GMAIL_TOKEN_FILE: ${GMAIL_TOKEN_FILE:-}
+    volumes:
+      - ./data:/app/data          # profile in; ranked_jobs.json and applications/ out
+      - models:/models            # embedding model cache, shared with api/ui
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_grace_period: 45s
+
+  # Scan scheduler (ADR-001 §3): APScheduler with its job store in Postgres,
+  # timezone Asia/Kolkata. It only ENQUEUES "scan" tasks (one per scheduled
+  # slot -- the idempotency key is the slot's fire time); the worker runs
+  # them. Leader election by a Postgres advisory lock: a second copy waits
+  # in standby, and a leader that loses its lock connection exits non-zero
+  # so `restart` brings it back -- there are never two leaders. Same image;
+  # it needs no volumes (no files, no model).
+  scheduler:
+    build: .
+    restart: unless-stopped
+    command: python -m backend.scheduler
+    environment:
+      DB_HOST: db
+      DB_USER: ${DB_USER:-ai_job_agent}
+      DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
+      DB_NAME: ${DB_NAME:-ai_job_agent}
+      SCAN_CRON: ${SCAN_CRON:-0 9 * * *}              # 09:00 IST daily
+      SCAN_MISFIRE_GRACE_S: ${SCAN_MISFIRE_GRACE_S:-3600}
+    depends_on:
+      db:
+        condition: service_healthy
+
   ui:
     build: .
     restart: unless-stopped
@@ -68,6 +153,8 @@ services:
       # Optional: hosted LLM inside containers (local Ollama isn't reachable
       # from Docker). Set in .env; empty means document generation is off.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # The Tracker's 'applied' schedules the follow-up (Phase 6).
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
     ports:
       - "8501:8501"
     volumes:

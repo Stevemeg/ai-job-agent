@@ -21,7 +21,7 @@ Deployed apps cannot reach a developer's local Ollama, so production uses Groq. 
 4. Deploy
 
 Cloud caveats (honest list):
-- **Ranking:** requirements.txt includes torch/sentence-transformers — the build is heavy but works on Community Cloud; first ranking run is slow. Prefer committing a pre-ranked `ranked_jobs.json` or using the sample corpus for demos.
+- **Ranking:** requirements.txt includes torch/sentence-transformers — the build is heavy but works on Community Cloud; first ranking run is slow. Prefer committing a pre-ranked `ranked_jobs.json` or using the sample corpus for demos. With no database configured this is **demo mode**: the "Rank jobs now" button ranks inside the Streamlit process, the only in-process ranking path left. If you add `DB_*` secrets, ranking moves to the task queue and needs a running worker ([Task worker](#task-worker)), which Community Cloud can't host.
 - **.docx generation needs Node.js**: add a `packages.txt` containing `nodejs` and `npm`, and the docx npm package must be installable (`backend/resume_engine/node_modules` is gitignored). Until wired, cover letters fall back to .txt gracefully; resume tailoring reports the error. A python-docx fallback is the planned proper fix.
 - **Tracker needs Postgres**: point `DB_*` env at a hosted Postgres (e.g. Neon/Supabase free tier) via secrets, or the Tracker tab shows its graceful "unreachable" panel.
 
@@ -34,7 +34,7 @@ The system runs entirely on the user's machine by design — resume data is sens
 | Python 3.11 + venv | Always | Everything |
 | Streamlit | `streamlit run backend/ui/app.py` | UI |
 | Ollama + Mistral | `ollama serve` | Tailoring, cover letters |
-| PostgreSQL 16 | Docker Compose | Outcome logging only |
+| PostgreSQL 16 | Docker Compose | Outcome logging; the task queue + worker (queued ranking and scans); the scheduler's job store |
 | Node.js ≥ 18 | Invoked by Python | `.docx` generation |
 
 ### Postgres
@@ -54,9 +54,13 @@ docker compose up --build
 # UI:  http://localhost:8501
 # API: http://localhost:8000/docs
 # DB:  localhost:5432
+
+# First run only: seed the database corpus the worker ranks against
+docker compose exec api python -m backend.database.corpus import data/sample_jobs.json
+#   (or data/jobs.json after running the collector)
 ```
 
-One shared image serves both the API and UI (same engines, different command). Design notes:
+One shared image serves the API, UI, **worker** and **scheduler** (same engines, different command). Design notes:
 
 - `./data` and `./uploads` are **bind-mounted** — profiles, corpora, and rankings persist on the host and stay shared with host-side CLI runs
 - The embedding model caches in a named `models` volume (`HF_HOME=/models`) — the ~90 MB download happens once, not per container
@@ -64,6 +68,74 @@ One shared image serves both the API and UI (same engines, different command). D
 - `requirements-docker.txt` is a curated runtime set, not the dev-machine freeze — smaller, Linux-clean image
 - **Ollama stays host-side** (resume tailoring / cover letters are CLI workflows); `backend/database/docker-compose.yml` still works standalone for DB-only development
 - Credentials override via `.env` at the repo root (`DB_USER` / `DB_PASSWORD` / `DB_NAME`)
+- The `worker` service runs `python -m backend.worker`. It waits for a healthy database, shares `./data` (profile in, `ranked_jobs.json` out) and the `models` cache with the API. `stop_grace_period: 45s` is deliberately longer than the worker's `--grace 30`, so a `docker compose stop` lets the current task finish instead of being SIGKILLed
+- The `scheduler` service runs `python -m backend.scheduler` ([Scan scheduler](#scan-scheduler)). It waits for a healthy database and needs no volumes. `SCAN_CRON` / `SCAN_MISFIRE_GRACE_S` pass through from `.env`. Run **one** copy. A second copy is harmless (it waits in standby), but it adds nothing
+
+## Task worker
+
+`python -m backend.worker` is the consumer of the Postgres task queue (`tasks` table, [ADR-001 §2](adr/ADR-001-v2-always-on-architecture.md)). It runs `rank` tasks, queued by `POST /v1/rankings` and the Streamlit re-rank buttons. It runs `scan` tasks, queued by the scheduler and by `POST /v1/scans`. And it runs the agent's `agent_run` and `application` tasks ([below](#agent-dry-run)).
+
+```bash
+DB_HOST=localhost python -m backend.worker            # all registered kinds
+python -m backend.worker --kinds rank --lease 60 --grace 30 --poll-max 10
+```
+
+- **Needs a database.** The worker refuses to start (exit code `2`, with a message on stderr) when neither `DATABASE_URL` nor `DB_HOST` is set, or when the database doesn't answer within `DB_CONNECT_TIMEOUT` (default 3s). On start it runs the idempotent schema migrations under a Postgres advisory lock, so API, UI and worker can boot together safely.
+- **Claims** use `SELECT … FOR UPDATE SKIP LOCKED`, so any number of workers can run side by side; each task runs on one of them. Its `worker_id` is `host:pid:short-uuid`.
+- **Leases.** A claimed task is leased for `--lease` seconds and heartbeated every lease/3. If the worker dies (crash, OOM, `kill -9`), the lease expires and another worker reclaims the task. Each claim counts as an attempt. A worker whose lease was reclaimed can no longer complete or fail the task: those writes are fenced on the lease holder.
+- **Retries.** A failed attempt is requeued with capped exponential backoff and jitter (5s, 10s, … up to 5 min). After `max_attempts` (3 for ranking) the task is `dead`, and `/v1/rankings/status` reports `failed` with the last error.
+- **Shutdown.** SIGTERM or SIGINT stops claiming and lets the current task finish within `--grace` seconds, then the worker exits `0`. If the task is still running when the grace period ends, the worker exits `3` and the task is recovered through lease expiry. A second signal exits immediately.
+- **Corpus.** `rank` tasks read the corpus from Postgres only (strict mode, no JSON fallback), so seed it first with `python -m backend.database.corpus import [path]`, or let a scan collect it.
+- **One rank at a time.** Every rank execution takes the rank lock: a session-level Postgres advisory lock on a dedicated connection, held for the scoring and the `ranked_jobs.json` write. That covers `rank` tasks, the rank step of a `scan`, and the CLIs when a database is configured. The lock is released when its holder's connection closes, so a killed worker never leaves it behind. A waiter gives up after 30 minutes, and its attempt is retried.
+- **Incremental.** Ranking only scores jobs without a current `job_scores` row for (job, profile hash, cache key). The cache key is `FORMULA_VERSION` plus a fingerprint of the weights, hard filters, embedding model and matcher source, so the first rank after a resume upload, a `FORMULA_VERSION` bump, or a deploy that changes any of those scores the whole corpus (minutes with the embedding model). Later ranks only score the delta. Rows for old profiles stay in `job_scores` (a few thousand per profile); nothing prunes them yet.
+- No database at all (the Streamlit Cloud demo) means no queue and no worker. The API's `POST /v1/rankings` returns 503 and the Streamlit app ranks inline.
+
+## Scan scheduler
+
+`python -m backend.scheduler` puts the corpus refresh on a clock ([ADR-001 §3](adr/ADR-001-v2-always-on-architecture.md)). It is APScheduler 3.x with its job store in Postgres (table `apscheduler_jobs`, created and owned by APScheduler, not `schema.sql`), running in timezone **Asia/Kolkata**. It has one job, `scan:scheduled`, on `SCAN_CRON` (default `0 9 * * *`, i.e. 09:00 IST / 03:30 UTC). See [CONFIGURATION.md](../CONFIGURATION.md#scheduled-scans).
+
+```bash
+DB_HOST=localhost python -m backend.scheduler
+```
+
+- **It only enqueues.** Each due run inserts one `scan` task and returns. The worker collects, upserts and ranks. The scheduler never imports the ML stack.
+- **One task per slot.** The task's idempotency key is `scan:scheduled:<scheduled fire time, UTC>`. It comes from the *scheduled* time, not the clock at execution, so re-firing a slot after a restart or crash is a no-op. If a scan (say, a manual `POST /v1/scans`) is still queued or running at fire time, the scheduled one is logged and skipped.
+- **Missed runs** (`coalesce`, `max_instances=1`, `misfire_grace_time = SCAN_MISFIRE_GRACE_S`). If the scheduler was down at fire time and comes back within the grace window, the slot runs once. If it comes back later, the slot is skipped. Several missed slots produce one run. A restart keeps the stored next run time unless `SCAN_CRON` changed.
+- **Leader election.** APScheduler 3.x can't share a job store between processes, so the scheduler takes `pg_try_advisory_lock` on a dedicated connection with TCP keepalives. A second copy waits in **standby**, retrying every 15 seconds, and starts nothing that could fire. If the leader's lock connection dies, Postgres releases the lock. The leader then fires nothing more (it re-checks the lock before every round of due jobs and leaves the stored next run time for whoever leads next) and exits with code `3`. `restart: unless-stopped` brings it back.
+- **Exit codes:** `0` stopped (SIGTERM/SIGINT), `2` no reachable database, `3` lost the leader lock, `4` bad `SCAN_CRON` / `SCAN_MISFIRE_GRACE_S`.
+- Without a database there is no scheduler. Refresh the JSON corpus by hand with `python -m backend.job_scraper.ats_collector`.
+
+## Agent (dry run)
+
+Phase 4 adds two task kinds that the same worker runs: `agent_run`, queued by `POST /v1/agent/runs` and, with `AGENT_ENABLED=true`, by every scan; and `application`, queued by an agent run, one per triaged job. Both are LangGraph graphs checkpointed in Postgres. See [API.md](API.md#agent-phase-4-dry-run).
+
+- **No outbound actions.** The agent drafts files and records them. It sends no email, uploads nothing and submits nothing. The only network traffic is the LLM provider's.
+- **LLM.** Configure the worker's provider as for the UI. In Docker that means `GROQ_API_KEY` in `.env`: compose passes it to the worker, and Ollama on the host isn't reachable from containers. `LLM_PROVIDER=fake` drafts offline with deterministic text (for tests and smoke runs).
+- **Node.** The worker renders `.docx` files with `backend/resume_engine/*.js`. The image installs Node and runs `npm ci` for them. On a bare host, install Node and run `npm ci` in `backend/resume_engine`.
+- **Files.** Drafts are written to `data/applications/<application_id>/` and recorded with their sha256 in `application_artifacts`. In compose, `./data` is bind-mounted into the worker and the API, so the API serves the worker's files.
+- **Checkpoints.** LangGraph's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) are created by the worker on first use, under the same advisory lock as the app's migrations, in the app's database and schema. They are not in `schema.sql`. Each graph step is committed before the next starts (`durability="sync"`). So a retried task resumes at the node its last attempt died in, and nodes it finished are not run again. Nothing prunes old threads yet.
+- **Failure.** An LLM outage or a failing node fails the attempt, which is retried with backoff like any task. After the last attempt the application is marked `failed` with the error. That also happens when a worker dies on the last attempt and its lease expires.
+- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`, `AGENT_LOCATIONS`, `AGENT_ACCEPT_GLOBAL_REMOTE`, `AGENT_EXCLUDE_TITLE_WORDS`, `AGENT_MEMORY_MAX_BOOST`, `AGENT_LEARN_*`, `AGENT_FOLLOW_UP_DAYS`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+
+## Approval gate and Gmail drafts
+
+Phase 5 adds two more task kinds on the same worker: `application_decision` (queued by a decision from the API or the Inbox, or by an expiry) and `approval_expiry` (queued with every drafted version, due `AGENT_APPROVAL_TTL_DAYS` later). See [API.md](API.md#approval-gate-phase-5).
+
+- **No waiting workers.** An application stops at `interrupt()` and its task completes. Decisions resume the thread later from its checkpoint, so a decision made days later needs no running task. A per-application advisory lock keeps two tasks from driving one thread at once.
+- **Never submits, never sends.** Approving writes the packet (`data/applications/<id>/packet.json`) and, only with Gmail configured and a contact address in the JD, one Gmail **draft**. The human applies.
+- **Exactly one draft.** The `gmail_draft` action row is committed (`pending`, with the Message-ID `<aja-<application_id>-<version>@ai-job-agent>`) before Gmail is called. A worker that dies after Gmail created the draft leaves the row pending; the retry looks the draft up by that Message-ID and records it instead of creating another (`tests/test_agent_gmail_kill.py` SIGKILLs a worker in exactly that window).
+- **Gmail secrets.** The OAuth client JSON and the token live under `data/secrets/` (gitignored). In compose, `./data` is bind-mounted into the worker, so set `GMAIL_CREDENTIALS_FILE=/app/data/secrets/gmail_client.json` in `.env` after authorizing on the host (`python -m backend.integrations.gmail_auth`). The token is a credential for your mailbox: protect `data/secrets/` like a password.
+- **Phase 4 data.** Existing `drafted` / `needs_review` applications become `awaiting_approval` (version 1) on first start, with an expiry task each. Their graph threads ended after `persist`; the first decision moves them onto the gate.
+- **API exposure.** Set `API_TOKEN` before the API is reachable by anyone but you: it guards every mutating endpoint (decisions included). Reads stay open and return your documents, so keep port 8000 on localhost or a private network even with a token. The Streamlit UI has no auth at all.
+
+## Memory, follow-ups and sourcing (Phase 6)
+
+- **One more task kind.** `follow_up`, queued when `applied` is logged for a job with an application (in that transaction) and due `AGENT_FOLLOW_UP_DAYS` later, runs on the same worker. Give the API and the UI the same `AGENT_FOLLOW_UP_DAYS` as the worker: the process that logs `applied` schedules it. A dead `follow_up` task marks its pending draft `failed` and puts the error on the application.
+- **Follow-up drafts.** Only with `GMAIL_CREDENTIALS_FILE` and a contact address in the posting; one per application, exactly once (Message-ID `<aja-followup-<id>@ai-job-agent>`, the Phase 5 pattern). Never sent.
+- **Memory.** `agent_memories` is a new table; existing databases get it, `applications.memory_effects`, `applications.follow_up_due` and the `gmail_follow_up` action on first start (idempotent migrations). Learning runs in the decision task and in every agent run's triage; a learning failure is logged and never fails either.
+- **Cover letters.** One validator for every letter (`letter_validator.py`). Its known-name rule reads the job corpus's company names (one query per worker or API process every 10 minutes; the JSON corpus without a database).
+- **Learning-to-rank export.** `python -m backend.ltr.export` writes `data/ltr/outcomes.csv` (gitignored: your decisions and applications). `GET /v1/ltr/export` serves the same CSV, unauthenticated like every read, so keep the API private.
+- **Sources.** `python -m backend.job_scraper.probe_boards` calls the three public job-board APIs (a few requests per name, 0.25 s apart); use it from a machine with normal network access, not from the worker.
 
 ## Single-Host Server Deployment (small-team demo)
 
@@ -72,12 +144,12 @@ One shared image serves both the API and UI (same engines, different command). D
                      [ollama serve]        (host, GPU strongly recommended)
 ```
 
-Add before exposing publicly: an auth proxy in front of Streamlit (it has no auth), per-user profile isolation (currently single-profile), and upload size limits.
+Add before exposing publicly: `API_TOKEN` for the API's mutating endpoints (and keep its reads private), an auth proxy in front of Streamlit (it has no auth), per-user profile isolation (currently single-profile), and upload size limits.
 
 ## Production SaaS Path (planned)
 
 1. **API extraction** — FastAPI over `analysis/` + `matching_engine/` ([API.md](API.md)); Streamlit (later React) becomes a client
-2. **Workers** — ranking and LLM generation move to a task queue (Celery/RQ); API returns job ids
+2. **Workers** — ranking runs on the Postgres task queue and `python -m backend.worker` (done in v2 Phase 2; a Postgres queue was chosen over Celery/RQ, see ADR-001). LLM document generation moves onto the same queue next
 3. **Storage** — profiles → Postgres; job corpus → Postgres + precomputed embedding index (encode corpus once per refresh, not per user)
 4. **LLM serving** — pool of Ollama instances or a hosted-model API; if hosted, the "resume never leaves the device" promise changes and must be disclosed prominently
 5. **Observability** — parse-confidence distributions, gate-pass rates, and validator flag rates are the natural health metrics; log them per run

@@ -16,6 +16,14 @@
 
 - **Outcome logging at scale** — applying to ranked jobs and logging results via `log_outcome_cli`; this is the prerequisite for everything in "learning" below
 
+## 🚧 v2 (in progress) — "Always-On Agent"
+
+v2 turns the request-driven v1 pipeline into a durable, scheduled agent. It has a LangGraph graph with a Postgres checkpointer, a Postgres-backed task queue, APScheduler scans (`Asia/Kolkata`), and the corpus in `canonical_jobs`. It also has a human approval gate via `interrupt()`, and approval decisions are logged as events automatically, which replaces manual outcome logging for anything the agent surfaces. v2 **never submits applications** (it writes Gmail drafts only), so it replaces the "Auto-apply agent" idea under *Future* below.
+
+- **Plan and acceptance criteria:** [V2_PLAN.md](V2_PLAN.md), phases 0–7
+- **Architecture and guardrails:** [ADR-001](adr/ADR-001-v2-always-on-architecture.md)
+- **Branch:** `v2-always-on` · **Current phase:** 5 (approval gate + Gmail drafts), in review
+
 ## 📋 Planned — v1.1
 
 1. ~~**Test suite**~~ — ✅ done: 49 pytest cases (analysis, validator, tracker, taxonomy, regressions) wired into CI. Still to grow: parser tests over diverse resume fixtures, matcher integration tests
@@ -30,7 +38,7 @@
 - **Learning-to-rank** — replace hand-tuned weights (0.40/0.30/0.20/0.10) with a model trained on outcome events; needs ~50+ real outcomes; events schema was designed for this from day one
 - **Multi-domain taxonomies** — skill databases + role archetypes for mechanical/civil/electrical/HR/marketing/finance (architecture is data-driven; this is content work, not code work)
 - **Multi-user SaaS** — profiles to Postgres, auth, per-user ranking caches, precomputed corpus embeddings
-- **Auto-apply agent** — browser agent fills ATS forms with tailored documents behind a mandatory human-review gate
+- ~~**Auto-apply agent** — browser agent fills ATS forms with tailored documents behind a mandatory human-review gate~~ — **superseded by v2**: the agent never submits applications (approval gate + Gmail drafts only; see [ADR-001](adr/ADR-001-v2-always-on-architecture.md))
 
 ## Long-Term Vision
 

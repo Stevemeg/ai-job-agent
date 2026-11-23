@@ -8,6 +8,34 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+
+    # Throwaway Postgres for the `db`-marked tests. Each test also isolates
+    # itself in its own schema (tests/conftest.py), so tests never share state.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ai_job_agent
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: ai_job_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_job_agent -d ai_job_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # The variable names backend/database/db.py already reads. No LLM
+    # network calls in CI: every generate() goes to the deterministic fake.
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: ai_job_agent
+      DB_PASSWORD: ci_only_password
+      DB_NAME: ai_job_agent
+      LLM_PROVIDER: fake
+
     steps:
       - uses: actions/checkout@v4
 
@@ -27,11 +55,74 @@ jobs:
       - name: Validator smoke test (no heavy deps needed)
         run: python -m backend.resume_engine.validate_tailored
 
-      - name: Unit tests
+      - name: Install test deps
         # Deliberately light install: analysis/validator/taxonomy tests are
-        # pure-stdlib; tracker tests need sqlalchemy only (importorskip guards
-        # anything heavier). Full requirements.txt (torch etc.) is not needed
-        # to validate the domain logic.
+        # pure-stdlib; tracker/corpus tests need sqlalchemy + psycopg2; the
+        # collector tests need requests + bs4; the scheduler tests need
+        # APScheduler 3.x (importorskip guards anything heavier). Full
+        # requirements.txt (torch etc.) is not needed to validate the domain
+        # logic: the ranking tests run the real matcher with the embedding
+        # similarity stubbed. The agent tests need LangGraph and its
+        # checkpointer, at the versions requirements.txt pins (its
+        # agent-pins block, transitive dependencies included). FastAPI and
+        # Starlette are pinned to the versions requirements.txt pins.
         run: |
-          pip install sqlalchemy fastapi httpx python-multipart
-          pytest tests/ -q
+          pip install sqlalchemy psycopg2-binary "fastapi==0.165.0" "starlette==1.10.0" httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
+          sed -n '/^# agent-pins:begin/,/^# agent-pins:end/p' requirements.txt > /tmp/agent-requirements.txt
+          pip install -r /tmp/agent-requirements.txt
+          pip check
+
+      - name: Install the docx generators' Node deps
+        # The .docx rendering tests run the real generators.
+        run: npm ci --prefix backend/resume_engine --no-audit --no-fund
+
+      - name: Unit tests
+        run: pytest -q -rs -m "not db"
+
+      - name: DB tests (postgres service)
+        # Must RUN here, never skip: conftest fails db tests under CI when no
+        # DB is configured, and this step fails if any were skipped anyway.
+        shell: bash
+        run: |
+          pytest -q -rs -m db | tee db-tests.log
+          if grep -q "SKIPPED" db-tests.log; then
+            echo "::error::db-marked tests were skipped in CI"
+            exit 1
+          fi
+
+  # The worker renders .docx files with Node: build the real image and
+  # render a resume and a cover letter inside it.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t ai-job-agent:ci .
+
+      - name: Render both .docx files inside the image
+        run: |
+          docker run --rm -i -e LLM_PROVIDER=fake ai-job-agent:ci sh -c 'node --version && python -' <<'PY'
+          import zipfile
+          from pathlib import Path
+          from backend.resume_engine import cover_letter, resume_tailor
+          profile = {"name": "Image Check", "email": "c@example.com", "phone": "1",
+                     "skills": [{"skill": "RAG"}, {"skill": "FAISS"}],
+                     "education": [{"college": "X", "degree": "B.E.", "years": "2026"}],
+                     "projects": [{"title": "RAG Copilot", "duration": "2025",
+                                   "description": " • Built a RAG pipeline with FAISS."}]}
+          job = {"title": "AI Engineer", "company": "TestCo"}
+          jd = resume_tailor.extract_jd_requirements("RAG and FAISS.", None)
+          tailored = resume_tailor.tailor_resume_single_call(profile, jd, None)
+          content, _ = resume_tailor.build_tailored_resume(profile, job, jd, None,
+                                                           tailored=tailored, verbose=False)
+          out = Path("/tmp/render-check")
+          out.mkdir()
+          resume = resume_tailor.render_resume_docx(content, out / "resume.docx")
+          letter = cover_letter.render_cover_letter(["Hello TestCo."], out / "letter.docx",
+                                                    profile, job)
+          for path, needle in ((resume, "RAG Copilot"), (letter, "TestCo")):
+              with zipfile.ZipFile(path) as z:
+                  assert needle in z.read("word/document.xml").decode(), path
+              print(f"rendered {path} ({path.stat().st_size} bytes)")
+          PY

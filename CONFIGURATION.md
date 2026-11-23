@@ -2,16 +2,21 @@
 
 All configuration is via Streamlit Secrets (deployment) or environment variables (local/CLI/Docker). **Nothing is ever hardcoded.**
 
-## LLM Provider (automatic selection)
+## LLM Provider
 
-The engines call `backend.llm.generate(prompt)` and never know which backend serves it:
+The engines call `backend.llm.generate(prompt)` and never know which backend serves it. `LLM_PROVIDER` picks one; unset (or `auto`) keeps the automatic selection:
 
-| Condition | Provider | Default model |
-|---|---|---|
-| `GROQ_API_KEY` present (Streamlit Secrets or env) | **Groq** (hosted — production) | `llama-3.3-70b-versatile` |
-| No key | **Ollama** (localhost — development) | `mistral` |
+| `LLM_PROVIDER` | Condition | Provider | Default model |
+|---|---|---|---|
+| `auto` (default) | `GROQ_API_KEY` present (Streamlit Secrets or env) | **Groq** (hosted — production) | `llama-3.3-70b-versatile` |
+| `auto` (default) | No key | **Ollama** (localhost — development) | `mistral` |
+| `groq` | Needs `GROQ_API_KEY` (error without it) | **Groq** | `llama-3.3-70b-versatile` |
+| `ollama` | Ignores any `GROQ_API_KEY` | **Ollama** | `mistral` |
+| `fake` | Always | **Fake**: deterministic and offline, for CI and tests (`backend/llm/fake_provider.py`) | — |
 
-The deterministic hallucination validator runs on the output of *either* provider — no provider is trusted.
+The deterministic hallucination validator runs on the output of *every* provider — no provider is trusted.
+
+The fake provider files each call under a step (`extract_requirements`, `tailor_resume`, `tailor_bullets`, `order_skills`, `cover_letter`) by a marker phrase in its prompt and answers with a deterministic function of the prompt. Tests steer it with `FAKE_LLM_SLEEP` (`step=seconds,...`), `FAKE_LLM_RAISE` (`step=unavailable|error|none,...`) and `FAKE_LLM_LOG` (a file that gets one JSON line per call, written before any sleep, so calls are countable across processes). CI runs with `LLM_PROVIDER=fake`.
 
 ### Setting the Groq key
 
@@ -35,7 +40,118 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `GROQ_MODEL` | Secrets / env | `llama-3.3-70b-versatile` | Override Groq model (production-tier IDs only) |
 | `GROQ_TIMEOUT` | env | `120` | Groq request timeout (s) |
 | `OLLAMA_TIMEOUT` | env | `480` | Local Ollama timeout (s); first call loads the model |
+| `OLLAMA_MODEL` | env | `mistral` | Override the local Ollama model (any model you have pulled, e.g. `qwen2.5:1.5b-instruct-fp16`) |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_HOST` / `DB_PORT` | env / `.env` | dev defaults | PostgreSQL connection |
+| `DATABASE_URL` | env | — | Full PostgreSQL URL (Render/Neon); takes priority over `DB_*` |
+| `DB_CONNECT_TIMEOUT` | env | `3` | Seconds the corpus loader waits when probing the database |
+| `SCAN_CRON` | env / `.env` | `0 9 * * *` | When the scheduler queues a scan: a 5-field crontab in **Asia/Kolkata** time (the default is 09:00 IST = 03:30 UTC) |
+| `SCAN_MISFIRE_GRACE_S` | env / `.env` | `3600` | How late a missed scan may still run, in seconds. If the scheduler was down at the fire time and comes back within this window, the slot runs once; after that it is skipped. Several missed slots run once |
+| `LLM_PROVIDER` | env | `auto` | `auto`, `groq`, `ollama` or `fake` (see above) |
+| `AGENT_ENABLED` | env / `.env` (worker) | `false` | When `true`, every scan queues an agent run as its last step. Manual runs (`POST /v1/agent/runs`) work either way |
+| `AGENT_MIN_SCORE` | env / `.env` (worker) | `20` | Triage: a job's `match_score` must be at least this ([why 20](#why-agent_min_score-is-20)) |
+| `AGENT_MAX_JOB_AGE_DAYS` | env / `.env` (worker) | `14` | Triage: the job must have been seen by a scan within this many days (`last_seen_at`) |
+| `AGENT_MAX_DRAFTS_PER_RUN` | env / `.env` (worker) | `5` | Triage: at most this many new applications per run (`0` drafts nothing) |
+| `AGENT_LOCATIONS` | env / `.env` (worker) | `Bengaluru, Bangalore, Hyderabad, Pune, Chennai, Mumbai, Gurgaon, Gurugram, Noida, Delhi, NCR, India` | Triage: comma-separated. A job's location, or one of its postings', must contain one of these as whole words (case and spacing ignored) |
+| `AGENT_ACCEPT_GLOBAL_REMOTE` | env / `.env` (worker) | `false` | Triage: `true` also accepts remote jobs that don't mention India (plain "Remote", "Remote - USA"). Remote jobs that mention India are always accepted |
+| `AGENT_EXCLUDE_TITLE_WORDS` | env / `.env` (worker) | `senior,sr,staff,principal,lead,manager,director,head,architect,vp,distinguished` | Triage: comma-separated. A job whose **title** contains one of these as a whole word (case-insensitive) is not drafted for. `none` turns the filter off. Scoring is unchanged |
+| `AGENT_APPROVAL_TTL_DAYS` | env / `.env` (worker) | `7` | An application nobody approves, edits or declines within this many days of its latest draft expires |
+| `AGENT_MEMORY_MAX_BOOST` | env / `.env` (worker) | `5` | Triage: the most a job's matching `*_prefer` memories can add to its triage **order** key, in score points. Never added to its score, never past `AGENT_MIN_SCORE`. `0` turns the boost off |
+| `AGENT_LEARN_COMPANY_DECLINES` | env / `.env` (worker) | `2` | Memory: a company you declined this often (and never approved) is learned as `company_avoid` |
+| `AGENT_LEARN_TITLE_DECLINES` | env / `.env` (worker) | `3` | Memory: a title word you declined this often (and never approved) is learned as `title_avoid` |
+| `AGENT_LEARN_PREFER_APPROVALS` | env / `.env` (worker) | `2` | Memory: a company, title word or location you approved this often (more often than declined) is learned as `*_prefer` |
+| `AGENT_FOLLOW_UP_DAYS` | env / `.env` (worker and API) | `7` | A follow-up is due this many days after you log `applied`, unless a reply is logged first. Read when `applied` is logged, so the API (or the Tracker UI) process needs it too |
+| `GMAIL_CREDENTIALS_FILE` | env / `.env` (worker) | — | Path of a Google OAuth **Desktop app** client JSON. Gmail drafts are on only when this is set |
+| `GMAIL_TOKEN_FILE` | env / `.env` (worker) | `data/secrets/gmail_token.json` | Where the OAuth token is written and read (gitignored) |
+| `API_TOKEN` | env / `.env` (API) | — | When set, every mutating API endpoint needs `Authorization: Bearer <API_TOKEN>` (401 otherwise). Unset: no check, so never expose the API beyond localhost without it |
+
+## Scheduled scans
+
+`python -m backend.scheduler` reads `SCAN_CRON` and `SCAN_MISFIRE_GRACE_S` at start-up and refuses to start (exit code `4`) if either is malformed. Changing `SCAN_CRON` replaces the stored schedule on the next start, and the next run is computed from the new expression. The scheduler needs the database (`DATABASE_URL` or `DB_HOST`), and so does the worker that runs the scans. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#scan-scheduler).
+
+```bash
+SCAN_CRON="30 6 * * 1-5" SCAN_MISFIRE_GRACE_S=1800 DB_HOST=localhost python -m backend.scheduler   # 06:30 IST on weekdays
+```
+
+## The agent (Phase 4, dry run)
+
+The agent drafts a tailored resume and cover letter for the best new jobs. It never sends, uploads or submits anything (ADR-001). The worker reads the `AGENT_*` variables at the start of each run, so a changed `.env` takes effect on the next run without a restart. A malformed value fails the run with a clear error.
+
+Triage takes jobs that were scored for the **current** profile under the **current** scoring cache key, passed the hard gates, score at least `AGENT_MIN_SCORE`, were seen within `AGENT_MAX_JOB_AGE_DAYS`, have no application yet, have no `applied`, `dismiss` or `declined` event, are in a location the agent may draft for, and have a title the seniority filter keeps. It takes the best `AGENT_MAX_DRAFTS_PER_RUN` of them.
+
+Seniority filter (triage only): a title is skipped when it contains one of `AGENT_EXCLUDE_TITLE_WORDS` as a whole word, case-insensitively. Punctuation and hyphens split words, so `"Senior Staff Software Engineer"`, `"Sr. ML Engineer"` and `"Tech-Lead"` are skipped, while `"Leading-edge AI Engineer"` (`leading` is not `lead`), `"Headless CMS Developer"` and `"AI Engineer"` are kept. The job's score and rank don't change; the agent just doesn't draft for it.
+
+Location rules (triage only; scoring and ranking never look at them): a location qualifies when it contains one of `AGENT_LOCATIONS` as whole words (`"Bengaluru, India"` contains `bengaluru`; `"Indianapolis"` doesn't contain `india`). A remote location (`remote`, `anywhere`, `worldwide`, `wfh`) qualifies only if it mentions India, or with `AGENT_ACCEPT_GLOBAL_REMOTE=true`. A job qualifies if its own location or any of its postings' does. When a posting qualifies, the application uses that posting's location and `apply_link`.
+
+Phase 6: triage also applies the agent's memories (below): `*_avoid` memories leave jobs out and `*_prefer` memories reorder the rest, without changing any score.
+
+Drafts go to `data/applications/<application_id>/`. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#agent-dry-run) and [API.md](docs/API.md#agent-phase-4-dry-run).
+
+```bash
+AGENT_ENABLED=true AGENT_MIN_SCORE=25 DB_HOST=localhost python -m backend.worker
+```
+
+### Why `AGENT_MIN_SCORE` is 20
+
+`match_score` is not a percentage, and real scores are low. On the real corpus (3,875 jobs, one real profile, measured for the Phase 5 review), the jobs triage could ever take (in an `AGENT_LOCATIONS` location, seen within 14 days, passed the hard gates) were 41, with these scores:
+
+| max | p99 | p95 | p90 | p75 | p50 | min |
+|---|---|---|---|---|---|---|
+| 30.38 | 29.15 | 26.97 | 21.62 | 17.96 | 15.09 | 2.88 |
+
+The old default, 80, was above the best score in the corpus, so triage took nothing. 20 sits just under the 90th percentile: roughly the best tenth of the jobs the agent may draft for, which with `AGENT_MAX_DRAFTS_PER_RUN=5` is a handful of drafts per run rather than none or all of them. It only gates triage; it changes no score. Re-check it when the profile, the corpus or the scoring formula changes (the score distribution moves with all three), and raise it if the Inbox fills with weak matches.
+
+## Approvals and Gmail drafts (Phase 5)
+
+Every drafted application waits for you (`awaiting_approval`) in the Streamlit **Inbox** tab or via `POST /v1/applications/{id}/decision` ([API.md](docs/API.md#approval-gate-phase-5)). Approving builds the application packet. Nothing is ever sent or submitted: you apply from the apply link. A version nobody decides on within `AGENT_APPROVAL_TTL_DAYS` (7) expires.
+
+**Gmail drafts (optional).** With `GMAIL_CREDENTIALS_FILE` set, approving an application whose job description names a contact address also creates **one Gmail draft** to it, with the resume and cover letter attached. It is a draft: the agent cannot send it (the Gmail wrapper has no send code at all; the `gmail.compose` scope alone would allow it). To set it up:
+
+1. In Google Cloud, create an OAuth client of type **Desktop app** with the Gmail API enabled, and download its JSON (e.g. to `data/secrets/gmail_client.json`; `data/secrets/` is gitignored).
+2. Authorize once, on a machine with a browser: `GMAIL_CREDENTIALS_FILE=data/secrets/gmail_client.json python -m backend.integrations.gmail_auth`. This asks for the single `gmail.compose` scope and writes `data/secrets/gmail_token.json` (or `GMAIL_TOKEN_FILE`).
+3. Give the worker the same `GMAIL_CREDENTIALS_FILE` (and `GMAIL_TOKEN_FILE` if you moved it). The token refreshes itself.
+
+Without `GMAIL_CREDENTIALS_FILE`, approval stops at the packet (`ready_to_apply`).
+
+## Memory and follow-ups (Phase 6)
+
+The agent keeps **memories** of your preferences ([API.md](docs/API.md#memory)): ones you state (`/v1/memories`, the Inbox's Memory section) and ones it learns from your approvals and declines with the `AGENT_LEARN_*` thresholds above. They only steer triage: avoid memories keep matching jobs out, prefer memories move matching jobs up the order by at most `AGENT_MEMORY_MAX_BOOST`. Every learned memory shows its evidence (the decisions and your decline reasons). Deactivate one to stop it, and to stop it from being learned again.
+
+**Follow-ups** ([API.md](docs/API.md#follow-ups)): `AGENT_FOLLOW_UP_DAYS` after you log `applied` with no reply logged, the application shows under **Follow-ups due** in the Inbox, and with Gmail configured and a contact address in the posting one follow-up **draft** is created. Nothing is sent.
+
+**The learning-to-rank export:** `python -m backend.ltr.export --out data/ltr/outcomes.csv` (gitignored) or `GET /v1/ltr/export`. It is a dataset only; training waits for 50 labelled outcomes.
+
+## Job sources
+
+The collector reads only the public Greenhouse, Lever and Ashby job-board APIs (ADR-001 guardrail 3), for the slugs listed in `backend/job_scraper/ats_collector.py`: `GREENHOUSE_COMPANIES`, `LEVER_COMPANIES`, `ASHBY_COMPANIES`. To add a company, probe it first:
+
+```bash
+python -m backend.job_scraper.probe_boards Razorpay "Sarvam AI" "Observe.AI"
+python -m backend.job_scraper.probe_boards "Fi=epifi,fimoney" --json probe.json   # exact slugs
+```
+
+For each name it tries a few slug spellings (joined, hyphenated, first word, each with `india` / `hq`) on all three APIs, and **keeps a board only if it answers 200 and has at least one posting `AGENT_LOCATIONS` accepts**. Everything else is listed as dropped, with the reason (no board under any slug, a board with no eligible posting, a network error). It prints the lines to add; nothing is written. A short slug can be someone else's board, so check the board name and sample posting it shows.
+
+Phase 6 added seven India boards this way (verified 2026-11-23, India-eligible / total postings): Greenhouse `groww` (7/7), `observeai` (5/10), `inmobi` (39/71); Lever `cred` (11/12), `meesho` (47/48), the first Lever boards; Ashby `atlan` (3/7), `sarvam` (40/40). Of the other 33 candidates probed, Freshworks, Navi, Slice and Fi have boards with no India posting, and the rest have no public board under any slug tried.
+
+## Job corpus source
+
+Every reader (API, Streamlit, CLI) loads jobs through `backend/database/corpus.py`, in this order:
+
+1. **PostgreSQL `canonical_jobs`**, but only if a database is **explicitly configured** (`DATABASE_URL` or `DB_HOST` is set), it is reachable (probed once per process with `DB_CONNECT_TIMEOUT`), and it holds collected jobs.
+2. **`data/jobs.json`**, the full local corpus (gitignored).
+3. **`data/sample_jobs.json`**, the committed 120-job sample used by deployments.
+
+The tracker still uses the `DB_*` dev defaults with nothing set. The corpus deliberately doesn't, so a DB-less deployment never tries to connect. For local development against the Docker database, set `DB_HOST=localhost` to have the collector and the app use Postgres:
+
+```powershell
+$env:DB_HOST = "localhost"
+python -m backend.job_scraper.ats_collector            # upserts into canonical_jobs
+python -m backend.database.corpus import data/jobs.json # one-time: seed the DB from an existing JSON corpus
+python -m backend.database.corpus export                # DB -> data/jobs.json (refreshes the JSON fallback)
+python -m backend.database.corpus status                # which source is active, and its size
+```
+
+With no database, the collector dedupes into `data/jobs.json` on (company, normalized title) instead of appending.
 
 ## Why `llama-3.3-70b-versatile`
 

@@ -7,6 +7,21 @@ the candidate's real profile. Every paragraph passes through the same
 hallucination validator used for tailored resumes -- flagged paragraphs are
 reported so you can review before sending.
 
+Steps, callable one at a time (the agent graph runs each as its own node):
+
+  draft_cover_letter(profile, job, jd_requirements, model)   1 LLM call
+  validate_letter(paragraphs, profile) / letter_review(...)  no LLM
+  render_cover_letter(paragraphs, output_path, profile, job) .txt or .docx
+
+generate_for_job() chains them (plus extract_jd_requirements) for the UI.
+
+The truthfulness check is the cover-letter validator
+(letter_validator.py) for every letter -- the UI, this CLI and the agent's
+drafts, edits and follow-ups: sentence-starting words and lower-case
+hyphenated words aren't flagged on their capital or hyphen alone, known
+names that start a sentence are. Resume bullets keep the bullet validator
+(validate_tailored.validate_bullet).
+
 Run from project root:
     python -m backend.resume_engine.cover_letter --rank 1
     python -m backend.resume_engine.cover_letter --rank 3 --txt-only
@@ -14,15 +29,13 @@ Run from project root:
 import argparse
 import json
 import re
-import subprocess
 import sys
-import tempfile
-import os
 from pathlib import Path
 from ..config import DATA_DIR, PROFILE_FILE, RANKED_FILE
 from .resume_tailor import (call_ollama, extract_jd_requirements,
-                            DEFAULT_MODEL, OllamaUnavailableError)
-from .validate_tailored import validate_bullet
+                            DEFAULT_MODEL, OllamaUnavailableError,
+                            DocxRenderError, _run_node)
+from .letter_validator import validate_letter_paragraph
 
 DOCX_SCRIPT = Path(__file__).resolve().parent / "generate_cover_letter_docx.js"
 
@@ -83,44 +96,36 @@ Return this exact JSON structure:
     return None
 
 
-def validate_letter(paragraphs, profile):
-    """Run each paragraph through the hallucination validator.
-
-    Company/role names are allowed (the letter must mention them), so they're
-    added to the allowed list by the caller. Returns list of per-paragraph
-    results.
+def validate_letter(paragraphs, profile, job=None):
+    """Run each paragraph through the cover-letter validator
+    (letter_validator.py). `job` gives it the target company, which a
+    letter may name. Role words are filtered by the caller (letter_review,
+    the CLI). Returns list of per-paragraph results.
     """
     evidence = _profile_evidence_text(profile)
     skills = [s["skill"] for s in profile.get("skills", [])]
-    return [validate_bullet(p, evidence, skills) for p in paragraphs]
+    target = (job or {}).get("company")
+    return [validate_letter_paragraph(p, evidence, skills, target_company=target)
+            for p in paragraphs]
 
 
-def generate_for_job(profile, job, jd_text, model=DEFAULT_MODEL,
-                     make_docx=True):
-    """Full cover-letter pipeline for one job -- entry point for the UI and
-    future API. Returns (docx_or_txt_path, paragraphs, review) where review
-    is a list of {"paragraph": n, "flags": [...]} for unverified claims
-    (company/role mentions excluded -- a letter must name them).
-
-    Raises OllamaUnavailableError or RuntimeError."""
-    jd_requirements = extract_jd_requirements(jd_text or "", model)
-    paragraphs = draft_cover_letter(profile, job, jd_requirements, model)
-    if not paragraphs:
-        raise RuntimeError("The model did not return usable paragraphs -- "
-                           "try again (LLM output is non-deterministic).")
-
+def letter_review(paragraphs, profile, job):
+    """The truthfulness review a reader acts on: [{"paragraph": n,
+    "flags": [...]}] for each paragraph with unverified claims. Company and
+    role words are not flags (a letter must name them)."""
     expected = {(job.get("company") or "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title") or ""))}
     review = []
-    for i, r in enumerate(validate_letter(paragraphs, profile), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, job), 1):
         flags = ([t for t in r["flagged_terms"] if t.lower() not in expected]
                  + r["flagged_numbers"])
         if flags:
             review.append({"paragraph": i, "flags": flags})
+    return review
 
-    safe_company = re.sub(r'[^\w]', '_', (job.get('company') or 'company').lower())
-    safe_title = re.sub(r'[^\w]', '_', (job.get('title') or 'role').lower())[:30]
 
+def cover_letter_text(paragraphs, profile, job):
+    """The plain-text letter: contact lines, subject, body, sign-off."""
     letter_lines = [profile.get("name", ""), profile.get("email", ""),
                     profile.get("phone", ""), "",
                     f"Re: {job.get('title', '')} -- {job.get('company', '')}",
@@ -128,14 +133,11 @@ def generate_for_job(profile, job, jd_text, model=DEFAULT_MODEL,
     for p in paragraphs:
         letter_lines += [p, ""]
     letter_lines += ["Sincerely,", profile.get("name", "")]
-    txt_path = DATA_DIR / f"cover_letter_{safe_company}_{safe_title}.txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(letter_lines))
+    return "\n".join(letter_lines)
 
-    if not make_docx:
-        return txt_path, paragraphs, review
 
-    payload = {
+def _docx_payload(paragraphs, profile, job):
+    return {
         "candidate": {"name": profile.get("name", ""),
                       "email": profile.get("email", ""),
                       "phone": profile.get("phone", ""),
@@ -144,21 +146,59 @@ def generate_for_job(profile, job, jd_text, model=DEFAULT_MODEL,
         "target_company": job.get("company", ""),
         "paragraphs": paragraphs,
     }
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json',
-                                     delete=False, encoding='utf-8') as tmp:
-        json.dump(payload, tmp, ensure_ascii=False, indent=2)
-        tmp_path = tmp.name
-    docx_path = DATA_DIR / f"cover_letter_{safe_company}_{safe_title}.docx"
-    try:
-        result = subprocess.run(
-            ["node", str(DOCX_SCRIPT), tmp_path, str(docx_path)],
-            capture_output=True, text=True)
-    except FileNotFoundError:
-        return txt_path, paragraphs, review        # no node -> .txt still valid
-    finally:
-        os.unlink(tmp_path)
-    if result.returncode != 0:
+
+
+def render_cover_letter(paragraphs, output_path, profile, job):
+    """Write the letter to output_path and return the path: a .docx via
+    the Node generator, anything else as plain text. For a .docx, raises
+    FileNotFoundError if node is not on PATH and DocxRenderError (a
+    RuntimeError, with the generator's .stderr) if the generator fails."""
+    output_path = Path(output_path)
+    if output_path.suffix.lower() == ".docx":
+        result = _run_node(DOCX_SCRIPT, _docx_payload(paragraphs, profile, job),
+                           output_path)
+        if result.returncode != 0:
+            raise DocxRenderError(
+                f"docx generation failed: {result.stderr[:400]}", result.stderr)
+    else:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(cover_letter_text(paragraphs, profile, job))
+    return output_path
+
+
+def default_letter_path(job, suffix, output_dir=None):
+    """<output_dir, default DATA_DIR>/cover_letter_<company>_<title><suffix>."""
+    safe_company = re.sub(r'[^\w]', '_', (job.get('company') or 'company').lower())
+    safe_title = re.sub(r'[^\w]', '_', (job.get('title') or 'role').lower())[:30]
+    return (Path(output_dir) if output_dir else DATA_DIR) / \
+        f"cover_letter_{safe_company}_{safe_title}{suffix}"
+
+
+def generate_for_job(profile, job, jd_text, model=DEFAULT_MODEL,
+                     make_docx=True, output_dir=None):
+    """Full cover-letter pipeline for one job -- entry point for the UI and
+    future API. Returns (docx_or_txt_path, paragraphs, review) where review
+    is a list of {"paragraph": n, "flags": [...]} for unverified claims
+    (company/role mentions excluded -- a letter must name them). Files go
+    to output_dir (default DATA_DIR); the .txt is always written, and is
+    what is returned if the .docx can't be made.
+
+    Raises OllamaUnavailableError or RuntimeError."""
+    jd_requirements = extract_jd_requirements(jd_text or "", model)
+    paragraphs = draft_cover_letter(profile, job, jd_requirements, model)
+    if not paragraphs:
+        raise RuntimeError("The model did not return usable paragraphs -- "
+                           "try again (LLM output is non-deterministic).")
+    review = letter_review(paragraphs, profile, job)
+    txt_path = render_cover_letter(
+        paragraphs, default_letter_path(job, ".txt", output_dir), profile, job)
+    if not make_docx:
         return txt_path, paragraphs, review
+    try:
+        docx_path = render_cover_letter(
+            paragraphs, default_letter_path(job, ".docx", output_dir), profile, job)
+    except (FileNotFoundError, DocxRenderError):
+        return txt_path, paragraphs, review        # no node -> .txt still valid
     return docx_path, paragraphs, review
 
 
@@ -219,7 +259,7 @@ def main():
     expected = {job.get("company", "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title", "")))}
     any_real_flag = False
-    for i, r in enumerate(validate_letter(paragraphs, profile), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, job), 1):
         real_flags = [t for t in r["flagged_terms"] if t.lower() not in expected]
         if real_flags or r["flagged_numbers"]:
             any_real_flag = True
@@ -230,53 +270,19 @@ def main():
     if any_real_flag:
         print("  -> Edit the flagged claims before sending.")
 
-    # Assemble full letter text
-    letter_lines = [
-        profile.get("name", ""),
-        profile.get("email", ""),
-        profile.get("phone", ""),
-        "",
-        f"Re: {job.get('title', '')} -- {job.get('company', '')}",
-        "",
-        "Dear Hiring Team,",
-        "",
-    ]
-    for p in paragraphs:
-        letter_lines += [p, ""]
-    letter_lines += ["Sincerely,", profile.get("name", "")]
-    letter_text = "\n".join(letter_lines)
-
     safe_company = re.sub(r'[^\w]', '_', job.get('company', 'company').lower())
     safe_title = re.sub(r'[^\w]', '_', job.get('title', 'role').lower())[:30]
 
     txt_path = DATA_DIR / f"cover_letter_{safe_company}_{safe_title}.txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(letter_text)
+    render_cover_letter(paragraphs, txt_path, profile, job)
     print(f"\nStep 3/3: Saved {txt_path}")
 
     if not args.txt_only:
-        payload = {
-            "candidate": {
-                "name": profile.get("name", ""),
-                "email": profile.get("email", ""),
-                "phone": profile.get("phone", ""),
-                "linkedin": profile.get("linkedin", ""),
-            },
-            "target_role": job.get("title", ""),
-            "target_company": job.get("company", ""),
-            "paragraphs": paragraphs,
-        }
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json',
-                                         delete=False, encoding='utf-8') as tmp:
-            json.dump(payload, tmp, ensure_ascii=False, indent=2)
-            tmp_path = tmp.name
         docx_path = DATA_DIR / f"cover_letter_{safe_company}_{safe_title}.docx"
-        result = subprocess.run(
-            ["node", str(DOCX_SCRIPT), tmp_path, str(docx_path)],
-            capture_output=True, text=True)
-        os.unlink(tmp_path)
-        if result.returncode != 0:
-            print(f"WARNING: docx generation failed: {result.stderr}")
+        try:
+            render_cover_letter(paragraphs, docx_path, profile, job)
+        except DocxRenderError as exc:
+            print(f"WARNING: docx generation failed: {exc.stderr}")
             print("(.txt version was still saved above)")
         else:
             print(f"Saved {docx_path}")

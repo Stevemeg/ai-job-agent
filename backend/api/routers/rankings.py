@@ -1,69 +1,74 @@
 """Ranking endpoints. Ranking 3,875 jobs takes minutes (embedding model),
-so POST starts a background run and clients poll /rankings/status.
+so POST queues a run and clients poll /rankings/status -- the same contract
+as v1, now backed by the durable Postgres task queue (ADR-001 §2) instead of
+an in-process thread:
 
-Single-process state is deliberate for the current single-user deployment;
-the SaaS path swaps this for a real task queue (see docs/DEPLOYMENT.md)
-without changing the endpoint contract."""
+- POST /v1/rankings enqueues a "rank" task (202). The worker
+  (python -m backend.worker) claims and runs it and is the only writer of
+  ranked_jobs.json. While a rank task is queued or running, POST is 409.
+  With no database configured there is no queue, so POST is 503.
+- GET /v1/rankings/status maps the latest rank task onto RankingStatus
+  (services.ranking.status_from_task). No state lives in this process, so
+  restarts lose nothing and tests can't leak state into each other.
+- GET /v1/rankings serves the ranked file, unchanged.
+"""
 from __future__ import annotations
 
-import json
-import threading
-
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...config import RANKED_FILE
-from ..deps import load_profile, load_jobs, load_ranked
+from ...services import ranking
+from ..auth import require_token
+from ..deps import load_profile, load_ranked
 from ..schemas import RankedJob, RankingStatus
 
 router = APIRouter(prefix="/rankings", tags=["rankings"])
 
-_state = {"state": "idle", "detail": "", "ranked_count": None}
-_lock = threading.Lock()
+NO_QUEUE_DETAIL = (
+    "Ranking runs on the durable task queue, which needs a database. Set "
+    "DATABASE_URL or DB_HOST and run the worker (python -m backend.worker). "
+    "Without a database, rank from the Streamlit app (demo mode ranks "
+    "in-process).")
 
 
-def _run_ranking(profile: dict, jobs: list[dict]) -> None:
-    global _state
-    try:
-        # Heavy import (sentence-transformers/torch) deferred to the worker
-        # thread so the API process boots instantly without ML deps loaded.
-        from ...matching_engine.matcher import rank_jobs
-        ranked = rank_jobs(profile, jobs, candidate_is_fresher=True)
-        with open(RANKED_FILE, "w", encoding="utf-8") as f:
-            json.dump(ranked, f, ensure_ascii=False, indent=2)
-        with _lock:
-            _state = {"state": "done", "detail": "",
-                      "ranked_count": len(ranked)}
-    except Exception as exc:                                # noqa: BLE001
-        with _lock:
-            _state = {"state": "failed", "detail": str(exc),
-                      "ranked_count": None}
+def _db_unavailable(exc: Exception) -> HTTPException:
+    return HTTPException(503, f"Database unavailable ({exc.__class__.__name__}); "
+                              "the ranking queue can't be reached.")
 
 
-@router.post("", response_model=RankingStatus, status_code=202)
+@router.post("", response_model=RankingStatus, status_code=202, dependencies=[Depends(require_token)])
 def start_ranking():
-    global _state
-    with _lock:
-        if _state["state"] == "running":
-            raise HTTPException(409, "A ranking run is already in progress.")
-        profile = load_profile()
-        jobs = load_jobs()
-        if not jobs:
-            raise HTTPException(409, "No jobs.json. Run the collector first.")
-        _state = {"state": "running",
-                  "detail": f"Ranking {len(jobs)} jobs...",
-                  "ranked_count": None}
-    threading.Thread(target=_run_ranking, args=(profile, jobs),
-                     daemon=True).start()
-    return _state
+    if not ranking.queue_configured():
+        raise HTTPException(503, NO_QUEUE_DETAIL)
+    load_profile()                    # 404 before queueing work that can't run
+    # Deferred: SQLAlchemy only loads once a ranking is actually requested.
+    from sqlalchemy.exc import SQLAlchemyError
+    from ...database.corpus import CorpusUnavailable
+    from ...taskqueue import ConcurrencyConflict, get_task
+    try:
+        task = get_task(ranking.request_ranking())
+    except ConcurrencyConflict:
+        raise HTTPException(409, "A ranking run is already in progress.")
+    except CorpusUnavailable as exc:
+        if exc.reason == "empty":
+            raise HTTPException(
+                409, "No jobs in the database corpus. Import one first: "
+                     "python -m backend.database.corpus import")
+        raise _db_unavailable(exc)
+    except SQLAlchemyError as exc:
+        raise _db_unavailable(exc)
+    return ranking.status_from_task(task, RANKED_FILE.exists())
 
 
 @router.get("/status", response_model=RankingStatus)
 def ranking_status():
-    with _lock:
-        if _state["state"] == "idle" and RANKED_FILE.exists():
-            return {"state": "done", "detail": "loaded from previous run",
-                    "ranked_count": None}
-        return dict(_state)
+    if not ranking.queue_configured():
+        return ranking.status_from_task(None, RANKED_FILE.exists())
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        return ranking.ranking_status(RANKED_FILE.exists())
+    except SQLAlchemyError as exc:
+        raise _db_unavailable(exc)
 
 
 @router.get("", response_model=list[RankedJob])

@@ -5,43 +5,63 @@ log_impressions()  : call automatically every time rank_jobs() produces a
                       ranked list, so every job a user sees gets recorded.
 log_outcome()       : call manually (e.g. from a small CLI prompt or future
                       API endpoint) when something real happens -- applied,
-                      got an interview, rejected, offer.
+                      got an interview, rejected, offer. Phase 6: an
+                      'applied' for a job the agent has an application for
+                      also queues its follow-up, in the same transaction
+                      (agent/followups.py); a later outcome clears a due one.
 
 Both functions upsert the job into canonical_jobs first (insert if new,
 update last_seen_at if already known), so events always have a stable job_id
 to point to, regardless of how many times the same job gets re-scraped.
 """
-from .db import get_session, CanonicalJob, Event, VALID_EVENT_TYPES
+from .db import get_session, init_db, CanonicalJob, Event, VALID_EVENT_TYPES
 
 
 def _get_or_create_job(session, job_dict):
     """Find the canonical_jobs row for this job, or create it. Returns the
-    CanonicalJob ORM object (with a real .id) either way."""
+    CanonicalJob ORM object (with a real .id) either way.
+
+    Race-safe: when two sessions create the same new job at once, the stub
+    insert is INSERT ... ON CONFLICT (company, normalized_title) DO NOTHING,
+    so the loser waits for the winner's commit and then selects its row
+    instead of failing with a unique violation. The plain SELECT first
+    keeps the common (already known) path from burning a SERIAL value on a
+    conflicting insert for every impression."""
+    from sqlalchemy import func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     company = (job_dict.get("company") or "").strip()
     normalized_title = CanonicalJob.normalize_title(job_dict.get("title", ""))
 
-    existing = (session.query(CanonicalJob)
+    def _select():
+        return (session.query(CanonicalJob)
                 .filter_by(company=company, normalized_title=normalized_title)
                 .first())
+
+    existing = _select()
     if existing:
-        from sqlalchemy import func
         existing.last_seen_at = func.now()
         return existing
 
-    job = CanonicalJob(
-        company=company,
-        title=job_dict.get("title"),
-        normalized_title=normalized_title,
-        location=job_dict.get("location"),
-        tags=job_dict.get("tags") or [],
-        experience=job_dict.get("experience"),
-        seniority=job_dict.get("seniority"),
-        clean_description=job_dict.get("clean_description"),
-        apply_link=job_dict.get("apply_link"),
-        source=job_dict.get("source"),
-    )
-    session.add(job)
-    session.flush()   # populate job.id before returning
+    inserted_id = session.execute(
+        pg_insert(CanonicalJob.__table__)
+        .values(
+            company=company,
+            title=job_dict.get("title"),
+            normalized_title=normalized_title,
+            location=job_dict.get("location"),
+            tags=job_dict.get("tags") or [],
+            experience=job_dict.get("experience"),
+            seniority=job_dict.get("seniority"),
+            clean_description=job_dict.get("clean_description"),
+            apply_link=job_dict.get("apply_link"),
+            source=job_dict.get("source"),
+        )
+        .on_conflict_do_nothing(index_elements=["company", "normalized_title"])
+        .returning(CanonicalJob.__table__.c.id)).scalar()
+    job = _select()                  # ours, or the concurrent winner's row
+    if inserted_id is None:          # someone else created it: a re-sighting
+        job.last_seen_at = func.now()
     return job
 
 
@@ -85,6 +105,9 @@ def log_outcome(user_id, company, title, event_type, match_score=None,
             f"'{event_type}' is not a valid event_type. Must be one of: {VALID_EVENT_TYPES}"
         )
 
+    # Schema first, outside the session: its migrations must never wait on
+    # locks this session's own writes hold (memoized: free after the first).
+    init_db()
     with get_session() as session:
         canonical = _get_or_create_job(session, {"company": company, "title": title})
         event = Event(
@@ -97,4 +120,7 @@ def log_outcome(user_id, company, title, event_type, match_score=None,
         )
         session.add(event)
         session.flush()
+        from ..agent.followups import on_event_logged
+        on_event_logged(session.connection(), user_id=user_id, job_id=canonical.id,
+                        event_id=event.id, event_type=event_type)
         return event.id

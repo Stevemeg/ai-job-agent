@@ -5,6 +5,12 @@ data/candidate_profile.json.bak
 data/ranked_jobs.json
 data/resume_*.docx
 data/cover_letter_*
+# The agent's drafts (tailored resume, cover letter: contact details)
+data/applications/
+# The learning-to-rank export (your decisions and applications)
+data/ltr/
+# Gmail OAuth token (and any other secret the agent stores)
+data/secrets/
 backend/database/.env
 .env
 # Streamlit secrets (GROQ_API_KEY lives here locally) — NEVER commit

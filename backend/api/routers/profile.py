@@ -4,15 +4,16 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 
+from ..auth import require_token
 from ..deps import load_profile
 from ..schemas import ParseResult, Profile
 
 router = APIRouter(tags=["profile"])
 
 
-@router.post("/resumes", response_model=ParseResult)
+@router.post("/resumes", response_model=ParseResult, dependencies=[Depends(require_token)])
 async def upload_resume(file: UploadFile):
     """Parse a resume PDF. Saves the profile (backing up any existing one)
     and returns it with parse-confidence so clients can drive a review step."""
@@ -47,7 +48,7 @@ def get_profile():
     return load_profile()
 
 
-@router.put("/profile", response_model=Profile)
+@router.put("/profile", response_model=Profile, dependencies=[Depends(require_token)])
 def put_profile(profile: Profile):
     """Save a user-corrected profile (the API equivalent of Review & Edit)."""
     from ...resume_parser.api import save_profile

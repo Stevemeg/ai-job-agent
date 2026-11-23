@@ -1,8 +1,9 @@
 """Application-tracker endpoints over the Postgres events layer."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from ..auth import require_token
 from ..deps import load_profile
 from ..schemas import EventCreate, TrackedJob
 
@@ -32,7 +33,7 @@ def tracked_jobs():
     return get_tracked_jobs(user_id)
 
 
-@router.post("/events", status_code=201)
+@router.post("/events", status_code=201, dependencies=[Depends(require_token)])
 def create_event(event: EventCreate):
     user_id = _user_id()
     from ...database.events import log_outcome

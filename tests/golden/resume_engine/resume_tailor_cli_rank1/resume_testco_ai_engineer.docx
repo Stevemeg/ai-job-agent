@@ -1,0 +1,54 @@
+{
+  "candidate": {
+    "name": "Test Candidate",
+    "email": "test@example.com",
+    "phone": "+91 9999999999",
+    "linkedin": "https://linkedin.com/in/test",
+    "github": "https://github.com/test"
+  },
+  "education": [
+    {
+      "college": "Test Institute",
+      "degree": "B.E. AI/ML",
+      "cgpa": "8.0",
+      "years": "2022 - 2026"
+    }
+  ],
+  "skills": [
+    "CLIP",
+    "FAISS",
+    "Flask",
+    "GANs",
+    "Git",
+    "LLM",
+    "NumPy",
+    "Ollama",
+    "OpenCV",
+    "Pandas",
+    "RAG",
+    "Sentence Transformers"
+  ],
+  "projects": [
+    {
+      "title": "RAG Medical Copilot",
+      "duration": "Oct 2025 – Nov 2025",
+      "bullets": [
+        "Designed and deployed a Retrieval-Augmented Generation pipeline for clinical Q&A.",
+        "Implemented semantic search using Sentence Transformers and FAISS, indexing 2,500+ chunks with sub-second latency.",
+        "Integrated a local LLM via Ollama for offline inference."
+      ]
+    },
+    {
+      "title": "GAN Image Synthesizer",
+      "duration": "Mar 2025 – Aug 2025",
+      "bullets": [
+        "Engineered GAN pipelines generating 10,000+ synthetic images, expanding datasets by 3x.",
+        "Evaluated realism using FID and SSIM metrics.",
+        "Built training loop with checkpointing."
+      ]
+    }
+  ],
+  "target_role": "AI Engineer",
+  "target_company": "TestCo",
+  "jd_summary": "Builds and ships the systems this posting describes."
+}

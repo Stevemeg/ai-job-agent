@@ -1,0 +1,500 @@
+{
+  "corpus_companies": [
+    "groww",
+    "sarvam",
+    "inmobi",
+    "linear"
+  ],
+  "profile": {
+    "skills": [
+      {
+        "skill": "RAG",
+        "category": "Generative AI",
+        "domain": "AI"
+      },
+      {
+        "skill": "FAISS",
+        "category": "Vector Database",
+        "domain": "AI"
+      },
+      {
+        "skill": "Sentence Transformers",
+        "category": "NLP Framework",
+        "domain": "AI"
+      },
+      {
+        "skill": "Transformers",
+        "category": "NLP Framework",
+        "domain": "AI"
+      },
+      {
+        "skill": "Streamlit",
+        "category": "Deployment Framework",
+        "domain": "Software"
+      },
+      {
+        "skill": "Flask",
+        "category": "Backend Framework",
+        "domain": "Software"
+      },
+      {
+        "skill": "Git",
+        "category": "Version Control",
+        "domain": "Software"
+      },
+      {
+        "skill": "GitHub",
+        "category": "Version Control",
+        "domain": "Software"
+      },
+      {
+        "skill": "NumPy",
+        "category": "Data Science",
+        "domain": "AI"
+      },
+      {
+        "skill": "Pandas",
+        "category": "Data Science",
+        "domain": "AI"
+      },
+      {
+        "skill": "Retrieval-Augmented Generation",
+        "category": "Generative AI",
+        "domain": "AI"
+      }
+    ],
+    "projects": [
+      {
+        "title": "Medical AI Copilot (RAG-based Clinical Assistant)",
+        "description": "• Designed and deployed a Retrieval-Augmented Generation (RAG) system for clinical Q&A, grounding responses strictly in verified medical documents to reduce hallucinations and improve factual reliability. • Implemented semantic retrieval using Sentence Transformers + FAISS, indexing 2,500+ medical document. • Integrated Groq-hosted Llama 3.1 inference with a Streamlit-based frontend, enabling real-time AI-assisted medical querying with production-style deployment architecture."
+      },
+      {
+        "title": "Diabetic Retinopathy Detection",
+        "description": "• Built a two-stage deep learning pipeline using EfficientNetB0 for binary DR/No-DR classification (90%+ accuracy) and MobileNetV2+CBAM for 4-level severity grading (85%+ accuracy). • Applied Python OOP design for model loading, image augmentation, and prediction modules — keeping the codebase clean and independently testable."
+      },
+      {
+        "title": "Credit Risk Intelligence Platform",
+        "description": "• Built a production-grade credit risk platform on the Home Credit Default Risk dataset (166K+ applicants) that predicts loan default probability. • Explains decisions with SHAP, and lets analysts query applicant data in plain English — all deployed via a single Docker command."
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "real-6",
+      "kind": "real",
+      "provenance": "Phase 5 real run, application 6 (version 1), drafted by Ollama qwen2.5:1.5b q4_K_M",
+      "job": {
+        "title": "Senior AI Engineer",
+        "company": "gitlab"
+      },
+      "paragraphs": [
+        "I am writing to express my interest in the Senior AI Engineer role at GitLab, specifically focusing on diagnosing business problems, mapping workflows, identifying constraints, and validating whether AI is the right solution before building internal AI-powered solutions that drive measurable business outcomes.",
+        "The Medical AI Copilot project is the single strongest reason I am a perfect fit for this role. I designed and deployed a Retrieval-Augmented Generation (RAG) system for clinical Q&A, grounding responses strictly in verified medical documents to reduce hallucinations and improve factual reliability. This project involved implementing semantic retrieval using Sentence Transformers + FAISS, indexing 2,500+ medical documents, and integrating Groq-hosted Llama 3.1 inference with a Streamlit-based frontend, enabling real-time querying and analysis.",
+        "I am available for an interview at your earliest convenience. I am excited about the opportunity to contribute to GitLab's mission of enabling a more secure and efficient software development process. Thank you for considering my application. I look forward to the possibility of discussing how my skills and projects can contribute to GitLab's success."
+      ],
+      "expected": [
+        [],
+        [],
+        []
+      ],
+      "bullet_rules_flags": [
+        [
+          "AI-powered"
+        ],
+        [
+          "This"
+        ],
+        [
+          "Thank"
+        ]
+      ]
+    },
+    {
+      "id": "real-7",
+      "kind": "real",
+      "provenance": "Phase 5 real run, application 7 (version 1), drafted by Ollama qwen2.5:1.5b q4_K_M",
+      "job": {
+        "title": "Staff Software Engineer- Search Quality",
+        "company": "databricks"
+      },
+      "paragraphs": [
+        "I am writing to express my strong interest in the Staff Software Engineer- Search Quality role at Databricks. My background in RAG, FAISS, and Sentence Transformers, combined with my experience in medical AI, diabetic retinopathy detection, and credit risk intelligence, perfectly aligns with the role's requirements.",
+        "In my Medical AI Copilot project, I designed and deployed a RAG system that significantly reduced hallucinations and improved factual reliability in clinical Q&A. The system was integrated with a Streamlit frontend, indexing 2,500+ medical documents. This project showcased my ability to optimize AI systems and improve the accuracy and reliability of medical information.",
+        "For the Diabetic Retinopathy Detection project, I developed a two-stage deep learning pipeline that achieved 90%+ accuracy in binary classification and 85%+ accuracy in severity grading. The use of EfficientNetB0 and MobileNetV2+CBAM demonstrated my proficiency in applying advanced deep learning techniques to medical imaging tasks. Additionally, I applied Python OOP design principles to keep the codebase clean and independently testable, ensuring maintainability and scalability.",
+        "In the Credit Risk Intelligence Platform project, I built a production-grade credit risk platform on the Home Credit dataset, predicting loan default probability with high accuracy. The platform's explainability feature with SHAP and the ability to query applicant data in plain English further demonstrated my skills in optimizing AI systems for decision-making processes."
+      ],
+      "expected": [
+        [],
+        [],
+        [],
+        []
+      ],
+      "bullet_rules_flags": [
+        [
+          "My"
+        ],
+        [
+          "This"
+        ],
+        [
+          "Additionally"
+        ],
+        [
+          "decision-making"
+        ]
+      ]
+    },
+    {
+      "id": "real-8",
+      "kind": "real",
+      "provenance": "Phase 5 real run, application 8 (version 2: the model's 4 paragraphs plus a closing paragraph added by the run's edit test), drafted by Ollama qwen2.5:1.5b q4_K_M",
+      "job": {
+        "title": "Senior Staff Software Engineer- Search Quality",
+        "company": "databricks"
+      },
+      "paragraphs": [
+        "As a Senior Staff Software Engineer- Search Quality, I am excited to bring my unique blend of skills and projects to this role at Databricks. My background in RAG, FAISS, Sentence Transformers, and Transformers, combined with my experience in optimizing AI and improving traditional search, makes me an ideal candidate for this position. My expertise in building and deploying cutting-edge systems for contextual search and retrieval has already been validated through projects such as the Medical AI Copilot, where I ensured precise and reliable responses grounded in verified medical documents.",
+        "In my Medical AI Copilot project, I designed and deployed a RAG system that significantly reduced hallucinations and improved factual reliability. The system was integrated with a Streamlit frontend, indexing 2,500+ medical documents, and was deployed using Groq-hosted Llama 3.1 inference. This project showcased my ability to handle high-stakes accuracy and data heterogeneity.",
+        "Furthermore, my work on the Diabetic Retinopathy Detection project demonstrated my proficiency in deep learning and Python OOP design. I developed a two-stage deep learning pipeline that achieved 90%+ accuracy in binary DR/No-DR classification and 85%+ accuracy in 4-level severity grading. This project also involved applying Python OOP design for efficient model loading, image augmentation, and prediction modules, ensuring the codebase was clean and testable.",
+        "Lastly, my experience in building a production-grade credit risk platform on the Home Credit dataset has given me a strong foundation in optimizing AI applications. I successfully predicted loan default probability with a high level of accuracy, and I can confidently present my findings with SHAP explanations to help analysts query applicant data in plain English. This project highlights my ability to handle complex datasets and produce clear, actionable insights.",
+        "Thank you for your time; I would welcome a conversation about this role."
+      ],
+      "expected": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "bullet_rules_flags": [
+        [
+          "My",
+          "cutting-edge"
+        ],
+        [
+          "This",
+          "high-stakes"
+        ],
+        [
+          "Furthermore",
+          "This"
+        ],
+        [
+          "Lastly",
+          "This"
+        ],
+        [
+          "Thank"
+        ]
+      ]
+    },
+    {
+      "id": "tp-unlisted-tool",
+      "kind": "synthetic",
+      "provenance": "synthetic: an unlisted tool (Kubernetes) mid-sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "In my Medical AI Copilot project, I deployed the RAG system on Kubernetes to serve clinical Q&A."
+      ],
+      "expected": [
+        [
+          "Kubernetes"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Kubernetes"
+        ]
+      ]
+    },
+    {
+      "id": "tp-unlisted-tool-after-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a sentence-starting 'This' (not a claim) and an unlisted tool in the same sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "This project ran on Kubernetes and indexed 2,500+ medical documents with FAISS."
+      ],
+      "expected": [
+        [
+          "Kubernetes"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Kubernetes",
+          "This"
+        ]
+      ]
+    },
+    {
+      "id": "tp-invented-metric",
+      "kind": "synthetic",
+      "provenance": "synthetic: an invented metric (cut latency 40%)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "My retrieval pipeline cut latency 40% compared with keyword search."
+      ],
+      "expected": [
+        [
+          "40%"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "40%",
+          "My"
+        ]
+      ]
+    },
+    {
+      "id": "tp-unlisted-company",
+      "kind": "synthetic",
+      "provenance": "synthetic: an unlisted company claim (Google) mid-sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "During a summer internship at Google, I built semantic search with FAISS and Sentence Transformers."
+      ],
+      "expected": [
+        [
+          "Google"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "During",
+          "Google"
+        ]
+      ]
+    },
+    {
+      "id": "tp-hyphenated-unlisted-tool",
+      "kind": "synthetic",
+      "provenance": "synthetic: a hyphenated unlisted tool (Spark-based)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "I also built Spark-based feature pipelines for the Credit Risk Intelligence Platform."
+      ],
+      "expected": [
+        [
+          "Spark-based"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Spark-based"
+        ]
+      ]
+    },
+    {
+      "id": "tp-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: an unlisted big-tech company that starts the sentence (rule 3, curated list)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Google hired me as a machine learning intern."
+      ],
+      "expected": [
+        [
+          "Google"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Google"
+        ]
+      ]
+    },
+    {
+      "id": "tp-hyphenated-tool-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a hyphenated unlisted tool that starts the sentence (rule 3, curated list)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Kafka-backed streaming fed the Credit Risk Intelligence Platform."
+      ],
+      "expected": [
+        [
+          "Kafka-backed"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Kafka-backed"
+        ]
+      ]
+    },
+    {
+      "id": "tp-company-after-at",
+      "kind": "synthetic",
+      "provenance": "synthetic: 'At Microsoft, I ...': the name is mid-sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "At Microsoft, I built a RAG prototype for clinical Q&A."
+      ],
+      "expected": [
+        [
+          "Microsoft"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Microsoft"
+        ]
+      ]
+    },
+    {
+      "id": "tp-multi-word-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a three-word company name that starts the sentence (rule 3)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Tata Consultancy Services offered me a summer role in semantic search."
+      ],
+      "expected": [
+        [
+          "Tata Consultancy Services"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Consultancy",
+          "Services",
+          "Tata"
+        ]
+      ]
+    },
+    {
+      "id": "tp-corpus-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a company from the job corpus that starts the sentence (rule 3, corpus)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Groww's analytics team hired me to build retrieval pipelines."
+      ],
+      "expected": [
+        [
+          "Groww"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Groww"
+        ]
+      ]
+    },
+    {
+      "id": "tp-two-word-tool-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a two-word name from the curated list that starts the sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Hugging Face models power every demo I have shipped."
+      ],
+      "expected": [
+        [
+          "Hugging Face"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Face",
+          "Hugging"
+        ]
+      ]
+    },
+    {
+      "id": "tn-target-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: the target company starting a sentence is not a claim",
+      "job": {
+        "title": "AI Engineer",
+        "company": "databricks"
+      },
+      "paragraphs": [
+        "Databricks is where I want to apply my RAG and FAISS work."
+      ],
+      "expected": [
+        []
+      ],
+      "bullet_rules_flags": [
+        []
+      ]
+    },
+    {
+      "id": "tn-known-entity-in-the-profile",
+      "kind": "synthetic",
+      "provenance": "synthetic: a known entity the profile has, starting a sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Sentence Transformers and FAISS power my retrieval work."
+      ],
+      "expected": [
+        []
+      ],
+      "bullet_rules_flags": [
+        []
+      ]
+    }
+  ],
+  "known_misses": [
+    {
+      "id": "miss-unknown-company-at-sentence-start",
+      "kind": "known_miss",
+      "provenance": "synthetic: a company in none of rule 3's lists (corpus, taxonomy, curated) that starts the sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Zyphra hired me as a machine learning intern."
+      ],
+      "expected": [
+        [
+          "Zyphra"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Zyphra"
+        ]
+      ]
+    }
+  ]
+}

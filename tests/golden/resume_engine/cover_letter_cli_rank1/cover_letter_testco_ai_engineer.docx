@@ -1,0 +1,15 @@
+{
+  "candidate": {
+    "name": "Test Candidate",
+    "email": "test@example.com",
+    "phone": "+91 9999999999",
+    "linkedin": "https://linkedin.com/in/test"
+  },
+  "target_role": "AI Engineer",
+  "target_company": "TestCo",
+  "paragraphs": [
+    "The candidate is applying to TestCo with project evidence.",
+    "The strongest evidence is the RAG Medical Copilot project.",
+    "The candidate is available immediately."
+  ]
+}

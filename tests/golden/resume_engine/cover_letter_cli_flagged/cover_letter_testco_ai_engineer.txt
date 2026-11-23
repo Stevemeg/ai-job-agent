@@ -1,0 +1,16 @@
+Test Candidate
+test@example.com
++91 9999999999
+
+Re: AI Engineer -- TestCo
+
+Dear Hiring Team,
+
+The candidate is applying to TestCo with project evidence.
+
+I shipped Kubernetes clusters serving 2 million users.
+
+The candidate is available immediately.
+
+Sincerely,
+Test Candidate

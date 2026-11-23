@@ -2,7 +2,8 @@
 dict shapes so engines can evolve without breaking clients."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -102,6 +103,221 @@ class RankedJob(BaseModel):
     apply_link: Optional[str] = None
 
 
+# ---- scans --------------------------------------------------------------------
+
+class ScanSourceFailure(BaseModel):
+    source: str                    # greenhouse | lever | ashby
+    slug: str
+    error: str
+
+
+class ScanResult(BaseModel):
+    inserted: int                  # new canonical jobs
+    updated: int                   # existing jobs sighted again
+    changed: int                   # ...whose content changed
+    scored: int                    # jobs (re)scored by this scan's rank
+    skipped_unchanged: int         # jobs whose stored score was current
+    sources_ok: int
+    sources_failed: list[ScanSourceFailure] = Field(default_factory=list)
+    duration_s: float
+    corpus_version: Optional[str] = None
+    profile_hash: Optional[str] = None      # None: no profile, rank skipped
+    formula_version: str
+    ranked_count: Optional[int] = None
+    rank_skipped: Optional[str] = None
+
+
+class ScanStatus(BaseModel):
+    state: str                     # idle | running | done | failed
+    detail: str = ""
+    task_id: Optional[int] = None
+    trigger: Optional[str] = None  # schedule | api
+    scheduled_for: Optional[str] = None     # the slot, for scheduled scans
+    attempts: int = 0
+    max_attempts: Optional[int] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    result: Optional[ScanResult] = None     # set once state is done
+
+
+# ---- agent (Phase 4, dry run) -----------------------------------------------
+
+class DispatchedApplication(BaseModel):
+    application_id: int
+    task_id: int
+    job_id: int
+    match_score: float
+    title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None          # the qualifying posting's, else the job's
+    # Phase 6: the memories that moved it up the triage order (None: none)
+    memory_effects: Optional[dict[str, Any]] = None
+
+
+class AgentRunResult(BaseModel):
+    trigger: Optional[str] = None           # api | scan
+    scan_task_id: Optional[int] = None
+    formula_version: str
+    skipped: Optional[str] = None           # set when there was nothing to do
+    profile_hash: Optional[str] = None
+    cache_key: Optional[str] = None         # scoring cache key the run triaged under
+    refresh: Optional[dict[str, Any]] = None   # the incremental rank's stats
+    settings: Optional[dict[str, Any]] = None  # the AGENT_* values used
+    triaged: int = 0
+    # Phase 6: jobs over the score gate that triage left out, by rule
+    # ({"location": n, "title": n, "memory": n})
+    excluded: dict[str, int] = Field(default_factory=dict)
+    # Phase 6: {"active": memories applied, "learned": learn() stats,
+    # "boosted": candidates a memory moved up}
+    memory: Optional[dict[str, Any]] = None
+    dispatched: list[DispatchedApplication] = Field(default_factory=list)
+    skipped_existing: int = 0
+
+
+class AgentRunStatus(BaseModel):
+    state: str                     # idle | running | done | failed
+    detail: str = ""
+    task_id: Optional[int] = None
+    trigger: Optional[str] = None
+    scan_task_id: Optional[int] = None
+    attempts: int = 0
+    max_attempts: Optional[int] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    result: Optional[AgentRunResult] = None  # set once state is done
+
+
+class ApplicationSummary(BaseModel):
+    id: int
+    job_id: int
+    title: str
+    company: str
+    location: Optional[str] = None
+    apply_link: Optional[str] = None
+    # queued | drafting | awaiting_approval | approved | declined | expired |
+    # ready_to_apply | email_drafted | failed
+    status: str
+    match_score: Optional[float] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    needs_review: bool = False     # a validator flagged the current documents
+    version: int = 0               # documents version; decisions name it
+    follow_up_due: bool = False    # Phase 6: applied N days ago, no reply logged
+
+
+class ApplicationArtifactInfo(BaseModel):
+    # resume_docx | cover_letter_docx | cover_letter_txt | jd_requirements | packet
+    kind: str
+    sha256: str
+    size_bytes: Optional[int] = None        # None: the file is gone from disk
+    created_at: datetime
+    download_url: str
+    report: Optional[Any] = None   # the validator's report for this file
+
+
+class ApplicationTask(BaseModel):
+    task_id: int
+    state: str
+    detail: str = ""
+    attempts: int
+    max_attempts: int
+
+
+class ApplicationActionInfo(BaseModel):
+    action: str                    # packet | gmail_draft | gmail_follow_up
+    status: str                    # pending | done | failed
+    external_id: Optional[str] = None       # the Gmail draft id
+    message_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApprovalRecord(BaseModel):
+    id: int
+    decision: str                  # approve | decline | edit | expire
+    source: str                    # user | expiry
+    application_version: int
+    reason: Optional[str] = None
+    edits: Optional[dict[str, Any]] = None
+    decided_at: datetime
+
+
+class ApplicationDocuments(BaseModel):
+    """The reviewable text of the current version (from its checkpoint)."""
+    cover_letter_paragraphs: list[str] = Field(default_factory=list)
+    resume_projects: list[dict[str, Any]] = Field(default_factory=list)  # {title, bullets}
+    skills: list[str] = Field(default_factory=list)
+    edit_flags: list[dict[str, Any]] = Field(default_factory=list)       # acknowledged
+
+
+class ApplicationDetail(ApplicationSummary):
+    profile_hash: str
+    cache_key: str
+    thread_id: str
+    validator: dict[str, Any] = Field(default_factory=dict)  # {"resume": ..., "cover_letter": ...}
+    artifacts: list[ApplicationArtifactInfo] = Field(default_factory=list)
+    task: Optional[ApplicationTask] = None
+    # Phase 5 (approval gate)
+    match: Optional[dict[str, Any]] = None  # {score_breakdown, explanation: why-match, gaps}
+    documents: Optional[ApplicationDocuments] = None
+    packet: Optional[dict[str, Any]] = None  # packet.json, once approved
+    actions: list[ApplicationActionInfo] = Field(default_factory=list)
+    approvals: list[ApprovalRecord] = Field(default_factory=list)
+    # Phase 6: the memories that moved it up the triage order (None: none)
+    memory_effects: Optional[dict[str, Any]] = None
+
+
+class DecisionRequest(BaseModel):
+    action: Literal["approve", "decline", "edit"]
+    version: int = Field(ge=1)     # the version you reviewed (optimistic concurrency)
+    reason: Optional[str] = Field(None, max_length=2000)
+    # action "edit": {"cover_letter_paragraphs": [...], "resume_bullets": {title: [...]}}
+    edits: Optional[dict[str, Any]] = None
+    acknowledge_flags: bool = False  # keep an edit the validator flags
+
+
+class DecisionAccepted(BaseModel):
+    approval_id: int
+    task_id: int                   # the application_decision task applying it
+    application_id: int
+    decision: str
+    version: int
+    source: str
+
+
+# ---- agent memory (Phase 6) ---------------------------------------------------
+
+MemoryKind = Literal["company_avoid", "title_avoid", "company_prefer", "title_prefer",
+                     "location_prefer", "note"]
+
+
+class MemoryRecord(BaseModel):
+    id: int
+    kind: str                      # company_avoid | title_avoid | *_prefer | note
+    value: str
+    provenance: str                # stated (you) | learned (from your decisions)
+    evidence: dict[str, Any] = Field(default_factory=dict)  # approvals/events, reasons
+    weight: float                  # *_prefer: triage boost points; *_avoid: times seen
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryCreate(BaseModel):
+    kind: MemoryKind
+    value: str = Field(min_length=1, max_length=2000)
+    weight: Optional[float] = Field(None, ge=0, le=100)   # default 2 (stated)
+
+
+class MemoryUpdate(BaseModel):
+    value: Optional[str] = Field(None, min_length=1, max_length=2000)
+    weight: Optional[float] = Field(None, ge=0, le=100)
+    active: Optional[bool] = None
+
+
 # ---- tracker -----------------------------------------------------------------
 
 class EventCreate(BaseModel):
@@ -118,12 +334,13 @@ class TrackedEvent(BaseModel):
     event_type: str
     created_at: Any
     note: Optional[str] = None
+    source: Optional[str] = None   # agent events: user | expiry | agent
 
 
 class TrackedJob(BaseModel):
     company: str
     title: str
-    status: str
+    status: str                    # ... | approved | declined | expired
     apply_link: Optional[str] = None
     match_score: Optional[float] = None
     last_activity: Any

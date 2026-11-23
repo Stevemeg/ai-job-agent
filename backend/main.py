@@ -1,30 +1,58 @@
-import json
-import os
+"""
+main.py -- end-to-end CLI pipeline: parse resume -> load corpus -> filter ->
+rank -> save (ranked_jobs.json via services.ranking, its single writer).
 
-from resume_parser.resume_parser import (
+Run from project root:
+    python -m backend.main          (or: python backend/main.py)
+
+Reads uploads/resume.pdf. The corpus comes from the single corpus loader
+(backend/database/corpus.py: Postgres when configured and reachable, else
+data/jobs.json, else data/sample_jobs.json). If no corpus exists at all it
+falls back to fetching RemoteOK and persists that the same way the ATS
+collector does.
+
+(Previously this used bare top-level imports and '../data' paths, which only
+resolve when run from inside backend/ -- and even then failed, because the
+matching engine imports `..config` relatively.)
+"""
+import json
+import sys
+from pathlib import Path
+
+# Runnable both as `python -m backend.main` and as a plain script.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.config import DATA_DIR, UPLOADS_DIR, PROFILE_FILE  # noqa: E402
+
+from backend.resume_parser.resume_parser import (  # noqa: E402
     extract_text_from_pdf,
     extract_links_from_pdf,
     build_candidate_profile
 )
 
-from resume_parser.text_cleaner import (
+from backend.resume_parser.text_cleaner import (  # noqa: E402
     clean_resume_text
 )
 
-from job_scraper.job_collector import (
+from backend.job_scraper.job_collector import (  # noqa: E402
     fetch_remoteok_jobs
 )
 
-from job_scraper.job_database import (
-    save_jobs,
-    load_jobs
+from backend.job_scraper.ats_collector import (  # noqa: E402
+    save_collected_jobs
 )
 
-from matching_engine.matcher import (
-    rank_jobs
+from backend.database.corpus import (  # noqa: E402
+    load_corpus
 )
 
-from matching_engine.domain_filter import (
+from backend.services.ranking import (  # noqa: E402
+    rank_and_publish
+)
+
+from backend.matching_engine.domain_filter import (  # noqa: E402
     filter_jobs_by_domain
 )
 
@@ -39,15 +67,15 @@ def run_pipeline():
     # -----------------------------------
     # CREATE DATA FOLDER
     # -----------------------------------
-    os.makedirs(
-        "../data",
+    DATA_DIR.mkdir(
+        parents=True,
         exist_ok=True
     )
 
     # -----------------------------------
     # RESUME PARSING
     # -----------------------------------
-    pdf_path = "../uploads/resume.pdf"
+    pdf_path = str(UPLOADS_DIR / "resume.pdf")
 
     print("Parsing Resume...\n")
 
@@ -72,7 +100,7 @@ def run_pipeline():
     # SAVE CANDIDATE PROFILE
     # -----------------------------------
     with open(
-        "../data/candidate_profile.json",
+        PROFILE_FILE,
         "w",
         encoding="utf-8"
     ) as file:
@@ -92,7 +120,7 @@ def run_pipeline():
     # -----------------------------------
     print("Loading Jobs...\n")
 
-    jobs = load_jobs()
+    jobs = load_corpus()
 
     if not jobs:
 
@@ -101,17 +129,17 @@ def run_pipeline():
 
         jobs = fetch_remoteok_jobs()
 
-        save_jobs(jobs)
+        save_collected_jobs(jobs)
 
         print(
-            f"{len(jobs)} jobs saved locally.\n"
+            f"{len(jobs)} jobs saved.\n"
         )
 
     else:
 
         print(
             f"Loaded {len(jobs)} jobs "
-            f"from database.\n"
+            f"from the corpus.\n"
         )
 
     # -----------------------------------
@@ -142,30 +170,15 @@ def run_pipeline():
         filtered_jobs = jobs
 
     # -----------------------------------
-    # JOB MATCHING
+    # JOB MATCHING + SAVE RANKED JOBS
     # -----------------------------------
+    # Through the ranking service, the single writer of ranked_jobs.json.
     print("Matching Jobs...\n")
 
-    ranked_jobs = rank_jobs(
+    ranked_jobs = rank_and_publish(
         candidate_profile,
         filtered_jobs
     )
-
-    # -----------------------------------
-    # SAVE RANKED JOBS
-    # -----------------------------------
-    with open(
-        "../data/ranked_jobs.json",
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            ranked_jobs,
-            file,
-            indent=4,
-            ensure_ascii=False
-        )
 
     print("Ranked Jobs Saved.\n")
 

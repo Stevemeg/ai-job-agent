@@ -128,3 +128,122 @@ def test_event_validation_rejects_bad_type(client):
     r = c.post("/v1/tracker/events", json={
         "company": "X", "title": "Y", "event_type": "ghosted"})
     assert r.status_code == 422        # schema rejects before touching the DB
+
+
+def test_start_ranking_without_a_db_is_503(client):
+    """No database configured (conftest strips it): there is no queue to
+    run on, so POST refuses clearly instead of ranking in-process."""
+    c, tmp = client
+    r = c.post("/v1/rankings")
+    assert r.status_code == 503
+    assert "DATABASE_URL" in r.json()["detail"]
+    assert not (tmp / "ranked_jobs.json").exists()
+
+
+def test_ranking_status_without_a_db_or_previous_run_is_idle(client):
+    c, _ = client
+    assert c.get("/v1/rankings/status").json() == {
+        "state": "idle", "detail": "", "ranked_count": None}
+
+
+# ---- /v1/scans without a (reachable) database ---------------------------------------
+
+def test_scans_need_a_database(client):
+    c, _ = client
+    for method, path in (("post", "/v1/scans"), ("get", "/v1/scans/latest")):
+        r = getattr(c, method)(path)
+        assert r.status_code == 503
+        assert "DATABASE_URL" in r.json()["detail"]
+
+
+def test_scan_post_with_an_unreachable_database_is_503(client, monkeypatch):
+    pytest.importorskip("psycopg2")
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    monkeypatch.setenv("DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("DB_PORT", str(closed))
+    monkeypatch.setenv("DB_CONNECT_TIMEOUT", "1")
+    c, _ = client
+    r = c.post("/v1/scans")
+    assert r.status_code == 503
+    assert "Database unavailable" in r.json()["detail"]
+
+
+# ---- /v1/agent and /v1/applications without a database -------------------------------
+
+def test_the_agent_endpoints_need_a_database(client):
+    c, _ = client
+    for method, path in (("post", "/v1/agent/runs"), ("get", "/v1/agent/runs/latest"),
+                         ("get", "/v1/applications"), ("get", "/v1/applications/1"),
+                         ("get", "/v1/applications/1/artifacts/resume_docx")):
+        r = getattr(c, method)(path)
+        assert r.status_code == 503, path
+        assert "DATABASE_URL" in r.json()["detail"]
+
+
+def test_the_decision_endpoint_needs_a_database(client, monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1})
+    assert r.status_code == 503 and "DATABASE_URL" in r.json()["detail"]
+
+
+# ---- API_TOKEN ------------------------------------------------------------------------
+
+MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def test_every_mutating_route_requires_the_token(client, monkeypatch):
+    """Black-box: with API_TOKEN set, every POST/PUT/PATCH/DELETE route
+    answers 401 without the token -- including routes added later."""
+    # The public API as OpenAPI describes it: stable across FastAPI versions
+    # (0.165 no longer flattens included routers into app.routes).
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    routes = [(method.upper(), path) for path, ops in app.openapi()["paths"].items()
+              for method in sorted(ops) if method.upper() in MUTATING]
+    assert {p for _, p in routes} >= {
+        "/v1/resumes", "/v1/profile", "/v1/rankings", "/v1/scans", "/v1/tracker/events",
+        "/v1/agent/runs", "/v1/applications/{application_id}/decision"}
+    for method, path in routes:
+        url = path.replace("{application_id}", "1")
+        r = c.request(method, url, json={})
+        assert r.status_code == 401, (method, path, r.status_code)
+    # Reads never ask for it.
+    assert c.get("/v1/profile").status_code == 200
+    assert c.get("/healthz").status_code == 200
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"},
+                                     {"Authorization": "s3cret"},
+                                     {"Authorization": "Basic s3cret"}])
+def test_with_api_token_set_a_missing_or_wrong_token_is_401(client, monkeypatch, headers):
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    for method, path, body in (
+            ("post", "/v1/applications/1/decision", {"action": "approve", "version": 1}),
+            ("post", "/v1/agent/runs", None), ("post", "/v1/rankings", None),
+            ("post", "/v1/scans", None), ("put", "/v1/profile", {})):
+        r = getattr(c, method)(path, json=body, headers=headers)
+        assert r.status_code == 401, (path, r.status_code)
+        assert r.headers["www-authenticate"] == "Bearer"
+
+
+def test_with_the_right_token_the_request_goes_through(client, monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1},
+               headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 503                      # past auth; no database here
+    assert c.get("/healthz").status_code == 200      # reads need no token
+    assert c.get("/v1/profile").status_code == 200
+
+
+def test_without_api_token_nothing_is_checked(client, monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    c, _ = client
+    r = c.post("/v1/applications/1/decision", json={"action": "approve", "version": 1})
+    assert r.status_code == 503
+

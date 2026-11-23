@@ -1,6 +1,11 @@
 """Deployed instances never have data/jobs.json (gitignored, local-only) --
 load_jobs() must fall back to the committed data/sample_jobs.json so ranking
-and the Jobs tab still work out of the box."""
+and the Jobs tab still work out of the box.
+
+load_jobs() now delegates to database.corpus.load_corpus(); with no DB
+configured (conftest guarantees that here) it must behave exactly as the
+JSON-only loader did. Its (path, mtime) cache lives in the corpus module and
+is reset per test by conftest, so the old _jobs_cache patch is gone."""
 import json
 
 import pytest
@@ -18,7 +23,6 @@ def test_load_jobs_uses_full_corpus_when_present(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "JOBS_FILE", jobs_file)
     monkeypatch.setattr(deps, "SAMPLE_JOBS_FILE", sample_file)
-    monkeypatch.setattr(deps, "_jobs_cache", {"key": None, "jobs": []})
 
     assert deps.load_jobs() == [{"title": "Real"}]
 
@@ -31,7 +35,6 @@ def test_load_jobs_falls_back_to_sample_when_full_corpus_missing(
 
     monkeypatch.setattr(deps, "JOBS_FILE", jobs_file)
     monkeypatch.setattr(deps, "SAMPLE_JOBS_FILE", sample_file)
-    monkeypatch.setattr(deps, "_jobs_cache", {"key": None, "jobs": []})
 
     assert deps.load_jobs() == [{"title": "Sample"}]
 
@@ -39,6 +42,5 @@ def test_load_jobs_falls_back_to_sample_when_full_corpus_missing(
 def test_load_jobs_empty_when_neither_file_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(deps, "JOBS_FILE", tmp_path / "jobs.json")
     monkeypatch.setattr(deps, "SAMPLE_JOBS_FILE", tmp_path / "sample_jobs.json")
-    monkeypatch.setattr(deps, "_jobs_cache", {"key": None, "jobs": []})
 
     assert deps.load_jobs() == []

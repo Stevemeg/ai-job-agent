@@ -3,13 +3,16 @@ Small interactive CLI for manually logging outcome events (applied,
 interview, rejected, offer) -- the "manual" half of Phase 2's logging.
 
 Run from project root:
-    python -m backend.db.log_outcome_cli
+    python -m backend.database.log_outcome_cli
 """
-from .events import log_outcome, VALID_EVENT_TYPES
+from .events import log_outcome
 from .db import get_session, User
 
 DEMO_USER_EMAIL = "shanmuka@example.com"
 
+# The ONLY types a person may log by hand. Validation is against this list,
+# not VALID_EVENT_TYPES: the v2 agent types (approved/declined/drafted) are
+# valid in the database but are written by the agent alone.
 OUTCOME_TYPES = ("applied", "interview", "rejected", "offer", "save", "dismiss")
 
 
@@ -32,8 +35,8 @@ def main():
     print(f"\nEvent type options: {OUTCOME_TYPES}")
     event_type = input("Event type: ").strip().lower()
 
-    if event_type not in VALID_EVENT_TYPES:
-        print(f"\n'{event_type}' is not valid. Must be one of: {VALID_EVENT_TYPES}")
+    if event_type not in OUTCOME_TYPES:
+        print(f"\n'{event_type}' is not valid. Must be one of: {OUTCOME_TYPES}")
         return
 
     user_id = _get_or_create_demo_user()

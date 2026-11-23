@@ -1,0 +1,180 @@
+"""
+scan.py -- the scheduled incremental scan (Phase 3, ADR-001 §3/§4).
+
+A "scan" task, run by the worker:
+
+  collect from the ATS sources (each one isolated) -> upsert_jobs (commits)
+  -> ranking.execute_rank(): take the rank lock -> score the delta ->
+     assemble -> write RANKED_FILE -> release
+  -> (AGENT_ENABLED=true and a profile exists) enqueue an "agent_run",
+     idempotency key "agent_run:scan:<this scan's task id>"
+
+The delta is computed inside execute_rank, AFTER the upsert has committed
+and AFTER the rank lock is held, from job_scores alone -- never from what
+this scan changed. So a retry (the worker died after the upsert) still
+scores the jobs the first attempt saved, and jobs another collector saved
+while a rank was running are picked up as well.
+
+A failing source is recorded in the result and the scan carries on; the
+task fails (and retries with backoff) only if EVERY source failed. Sources
+are the existing public ATS APIs only (ADR-001 guardrail 3).
+
+Enqueued by the scheduler (python -m backend.scheduler, idempotency key
+from the scheduled fire time) and by POST /v1/scans. One scan at a time:
+every scan task holds concurrency_key "scan:default" while queued or
+running. Importing this module is cheap (no HTTP client, no ML stack): the
+scheduler imports it.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from . import ranking
+
+log = logging.getLogger(__name__)
+
+SCAN_KIND = "scan"
+SCAN_CONCURRENCY_KEY = "scan:default"
+SCAN_MAX_ATTEMPTS = 3
+
+
+class AllSourcesFailed(RuntimeError):
+    """Every ATS source failed: nothing was collected, so the attempt fails
+    (and is retried with backoff)."""
+
+
+def _all_failed_message(failed: list[dict]) -> str:
+    shown = "; ".join(f"{f['source']}/{f['slug']}: {f['error']}"
+                      for f in failed[:5])
+    more = f"; and {len(failed) - 5} more" if len(failed) > 5 else ""
+    return f"all {len(failed)} ATS sources failed ({shown}{more})"
+
+
+def _chain_agent_run(ctx: Any) -> dict | None:
+    """The scan's last step: queue the agent run that drafts for what this
+    scan found -- only with AGENT_ENABLED=true. Keyed on this scan's task
+    id, so a retried scan gets the run its first attempt queued, never a
+    second one. A run already queued or running (say, from the API) covers
+    it: logged and skipped. None when nothing was attempted."""
+    from ..agent import settings as agent_settings
+    if not agent_settings.settings_from_env().enabled:
+        return None
+    if ctx is None:
+        log.warning("scan: AGENT_ENABLED, but this scan has no task id to key "
+                    "an agent run on (not run by the worker); none queued")
+        return None
+    from ..agent.run_graph import request_agent_run
+    from ..taskqueue import ConcurrencyConflict
+    ctx.ensure_lease()
+    try:
+        task_id = request_agent_run(trigger="scan", scan_task_id=ctx.task.id)
+    except ConcurrencyConflict:
+        log.warning("scan: an agent run is already queued or running; "
+                    "not queueing another")
+        return {"task_id": None, "skipped": "an agent run is already queued or running"}
+    log.info("scan: queued agent run task %s", task_id)
+    return {"task_id": task_id}
+
+
+def run_scan_task(payload: dict, ctx: Any = None) -> dict:
+    """Worker handler for "scan" tasks; returns the scan's stats.
+
+    With no candidate profile yet, the corpus is still refreshed and the
+    rank step is skipped (result: rank_skipped, scored 0, profile_hash
+    None) -- the next scan or rank after a resume upload scores it all."""
+    from ..database.corpus import load_corpus_snapshot, require_database, upsert_jobs
+    from ..job_scraper import ats_collector
+    from ..version import FORMULA_VERSION
+
+    started = time.monotonic()
+    require_database()                       # a scan never falls back to JSON
+    collection = ats_collector.collect_sources()
+    if not collection.sources_ok:
+        raise AllSourcesFailed(_all_failed_message(collection.sources_failed))
+    if ctx is not None:
+        ctx.ensure_lease()                   # don't write for a lost task
+    upserted = upsert_jobs(collection.jobs)  # committed before the rank lock
+
+    profile = ranking.load_profile_if_present()
+    if profile is not None:
+        rank = ranking.execute_rank(profile, ctx=ctx)
+        rank_skipped = None
+    else:
+        rank = {"ranked_count": None, "scored": 0, "skipped_unchanged": 0,
+                "corpus_version": ranking.corpus_version_str(
+                    load_corpus_snapshot(require_db=True).version),
+                "profile_hash": None, "formula_version": FORMULA_VERSION}
+        rank_skipped = ("no candidate profile yet -- upload a resume "
+                        "(POST /v1/resumes); the next scan or rank scores the corpus")
+        log.warning("scan: %s", rank_skipped)
+
+    result = {
+        "inserted": upserted["inserted"],
+        "updated": upserted["updated"],
+        "changed": upserted["changed"],
+        "scored": rank["scored"],
+        "skipped_unchanged": rank["skipped_unchanged"],
+        "sources_ok": len(collection.sources_ok),
+        "sources_failed": collection.sources_failed,
+        "duration_s": round(time.monotonic() - started, 2),
+        "corpus_version": rank["corpus_version"],
+        "profile_hash": rank["profile_hash"],
+        "formula_version": rank["formula_version"],
+        "ranked_count": rank["ranked_count"],
+    }
+    if rank_skipped:
+        result["rank_skipped"] = rank_skipped
+    log.info("scan: %d new, %d re-sighted (%d changed), %d scored, %d unchanged, "
+             "%d/%d sources ok, %.1fs", result["inserted"], result["updated"],
+             result["changed"], result["scored"], result["skipped_unchanged"],
+             result["sources_ok"],
+             result["sources_ok"] + len(result["sources_failed"]),
+             result["duration_s"])
+    if profile is not None:
+        chained = _chain_agent_run(ctx)
+        if chained is not None:
+            result["agent_run"] = chained        # tasks.result only; not in ScanResult
+    return result
+
+
+def request_scan(payload: dict | None = None, *,
+                 idempotency_key: str | None = None, conn: Any = None) -> int:
+    """Queue a scan; returns the task id. Raises taskqueue.ConcurrencyConflict
+    while a scan is queued or running (unless idempotency_key repeats an
+    earlier enqueue: that returns the earlier task's id, and nothing new
+    runs)."""
+    from .. import taskqueue
+    return taskqueue.enqueue(SCAN_KIND, payload or {},
+                             idempotency_key=idempotency_key,
+                             concurrency_key=SCAN_CONCURRENCY_KEY,
+                             max_attempts=SCAN_MAX_ATTEMPTS, conn=conn)
+
+
+def latest_scan_task() -> dict | None:
+    from .. import taskqueue
+    return taskqueue.latest_task(kind=SCAN_KIND,
+                                 concurrency_key=SCAN_CONCURRENCY_KEY)
+
+
+def scan_status(task: dict | None) -> dict:
+    """The ScanStatus payload for a scan task (None: no scan yet): state
+    and detail as for rankings (task_status.describe), who triggered it,
+    and -- once done -- the scan's stats."""
+    from .task_status import describe
+    if task is None:
+        return {"state": "idle", "detail": "No scan has run yet.",
+                "task_id": None, "trigger": None, "scheduled_for": None,
+                "attempts": 0, "max_attempts": None, "created_at": None,
+                "started_at": None, "finished_at": None, "result": None}
+    state, detail = describe(task)
+    payload = task.get("payload") or {}
+    return {"state": state, "detail": detail, "task_id": task["id"],
+            "trigger": payload.get("trigger"),
+            "scheduled_for": payload.get("scheduled_for"),
+            "attempts": task["attempts"], "max_attempts": task["max_attempts"],
+            "created_at": task.get("created_at"),
+            "started_at": task.get("started_at"),
+            "finished_at": task.get("finished_at"),
+            "result": task.get("result") if state == "done" else None}

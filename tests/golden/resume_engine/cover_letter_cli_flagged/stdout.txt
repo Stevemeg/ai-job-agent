@@ -1,0 +1,16 @@
+Loading ranked list from <DATA>/ranked_jobs.json...
+
+Cover letter for: AI Engineer @ TestCo
+Step 1/3: Extracting JD requirements via Ollama...
+Step 2/3: Drafting cover letter...
+
+Truthfulness check (company/role mentions are expected flags):
+  Paragraph 1: OK
+  Paragraph 2: REVIEW -- unverified terms ['Kubernetes'], numbers ['2']
+  Paragraph 3: OK
+  -> Edit the flagged claims before sending.
+
+Step 3/3: Saved <DATA>/cover_letter_testco_ai_engineer.txt
+Saved <DATA>/cover_letter_testco_ai_engineer.docx
+
+Done. Review the truthfulness flags above before sending.
