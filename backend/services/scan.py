@@ -6,6 +6,8 @@ A "scan" task, run by the worker:
   collect from the ATS sources (each one isolated) -> upsert_jobs (commits)
   -> ranking.execute_rank(): take the rank lock -> score the delta ->
      assemble -> write RANKED_FILE -> release
+  -> (AGENT_ENABLED=true and a profile exists) enqueue an "agent_run",
+     idempotency key "agent_run:scan:<this scan's task id>"
 
 The delta is computed inside execute_rank, AFTER the upsert has committed
 and AFTER the rank lock is held, from job_scores alone -- never from what
@@ -48,6 +50,32 @@ def _all_failed_message(failed: list[dict]) -> str:
                       for f in failed[:5])
     more = f"; and {len(failed) - 5} more" if len(failed) > 5 else ""
     return f"all {len(failed)} ATS sources failed ({shown}{more})"
+
+
+def _chain_agent_run(ctx: Any) -> dict | None:
+    """The scan's last step: queue the agent run that drafts for what this
+    scan found -- only with AGENT_ENABLED=true. Keyed on this scan's task
+    id, so a retried scan gets the run its first attempt queued, never a
+    second one. A run already queued or running (say, from the API) covers
+    it: logged and skipped. None when nothing was attempted."""
+    from ..agent import settings as agent_settings
+    if not agent_settings.settings_from_env().enabled:
+        return None
+    if ctx is None:
+        log.warning("scan: AGENT_ENABLED, but this scan has no task id to key "
+                    "an agent run on (not run by the worker); none queued")
+        return None
+    from ..agent.run_graph import request_agent_run
+    from ..taskqueue import ConcurrencyConflict
+    ctx.ensure_lease()
+    try:
+        task_id = request_agent_run(trigger="scan", scan_task_id=ctx.task.id)
+    except ConcurrencyConflict:
+        log.warning("scan: an agent run is already queued or running; "
+                    "not queueing another")
+        return {"task_id": None, "skipped": "an agent run is already queued or running"}
+    log.info("scan: queued agent run task %s", task_id)
+    return {"task_id": task_id}
 
 
 def run_scan_task(payload: dict, ctx: Any = None) -> dict:
@@ -104,6 +132,10 @@ def run_scan_task(payload: dict, ctx: Any = None) -> dict:
              result["sources_ok"],
              result["sources_ok"] + len(result["sources_failed"]),
              result["duration_s"])
+    if profile is not None:
+        chained = _chain_agent_run(ctx)
+        if chained is not None:
+            result["agent_run"] = chained        # tasks.result only; not in ScanResult
     return result
 
 
