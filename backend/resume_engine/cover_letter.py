@@ -100,18 +100,22 @@ Return this exact JSON structure:
     return None
 
 
-def validate_letter(paragraphs, profile, letter_rules=False):
+def validate_letter(paragraphs, profile, letter_rules=False, job=None):
     """Run each paragraph through the hallucination validator.
 
     Company/role names are allowed (the letter must mention them), so they're
     added to the allowed list by the caller. Returns list of per-paragraph
     results. letter_rules=True uses the cover-letter validator
-    (letter_validator.py) instead of the resume-bullet one.
+    (letter_validator.py) instead of the resume-bullet one; `job` gives it
+    the target company.
     """
     evidence = _profile_evidence_text(profile)
     skills = [s["skill"] for s in profile.get("skills", [])]
-    check = validate_letter_paragraph if letter_rules else validate_bullet
-    return [check(p, evidence, skills) for p in paragraphs]
+    if not letter_rules:
+        return [validate_bullet(p, evidence, skills) for p in paragraphs]
+    target = (job or {}).get("company")
+    return [validate_letter_paragraph(p, evidence, skills, target_company=target)
+            for p in paragraphs]
 
 
 def letter_review(paragraphs, profile, job, letter_rules=False):
@@ -122,7 +126,7 @@ def letter_review(paragraphs, profile, job, letter_rules=False):
     expected = {(job.get("company") or "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title") or ""))}
     review = []
-    for i, r in enumerate(validate_letter(paragraphs, profile, letter_rules), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, letter_rules, job), 1):
         flags = ([t for t in r["flagged_terms"] if t.lower() not in expected]
                  + r["flagged_numbers"])
         if flags:

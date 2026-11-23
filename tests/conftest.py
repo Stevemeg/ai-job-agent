@@ -36,6 +36,16 @@ def _reset_corpus_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_corpus_entities(monkeypatch):
+    """The letter validator's rule 3 reads company names from the job
+    corpus (letter_validator.corpus_companies). Tests see none, so their
+    results never depend on a developer's data/jobs.json or database;
+    a test that wants the real loader sets it back (_corpus_companies)."""
+    from backend.resume_engine import letter_validator
+    monkeypatch.setattr(letter_validator, "corpus_companies", lambda: frozenset())
+
+
+@pytest.fixture(autouse=True)
 def _db_isolation(request, monkeypatch):
     if request.node.get_closest_marker("db"):
         if not _db_configured():

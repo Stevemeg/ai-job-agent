@@ -1,4 +1,10 @@
 {
+  "corpus_companies": [
+    "groww",
+    "sarvam",
+    "inmobi",
+    "linear"
+  ],
   "profile": {
     "skills": [
       {
@@ -253,7 +259,7 @@
     {
       "id": "tp-unlisted-company",
       "kind": "synthetic",
-      "provenance": "synthetic: an unlisted company claim (Google)",
+      "provenance": "synthetic: an unlisted company claim (Google) mid-sentence",
       "job": {
         "title": "AI Engineer",
         "company": "acme"
@@ -294,13 +300,11 @@
           "Spark-based"
         ]
       ]
-    }
-  ],
-  "known_misses": [
+    },
     {
-      "id": "miss-company-at-sentence-start",
-      "kind": "known_miss",
-      "provenance": "synthetic: an unlisted company that starts the sentence",
+      "id": "tp-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: an unlisted big-tech company that starts the sentence (rule 3, curated list)",
       "job": {
         "title": "AI Engineer",
         "company": "acme"
@@ -320,9 +324,9 @@
       ]
     },
     {
-      "id": "miss-hyphenated-tool-at-sentence-start",
-      "kind": "known_miss",
-      "provenance": "synthetic: a hyphenated unlisted tool that starts the sentence",
+      "id": "tp-hyphenated-tool-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a hyphenated unlisted tool that starts the sentence (rule 3, curated list)",
       "job": {
         "title": "AI Engineer",
         "company": "acme"
@@ -338,6 +342,157 @@
       "bullet_rules_flags": [
         [
           "Kafka-backed"
+        ]
+      ]
+    },
+    {
+      "id": "tp-company-after-at",
+      "kind": "synthetic",
+      "provenance": "synthetic: 'At Microsoft, I ...': the name is mid-sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "At Microsoft, I built a RAG prototype for clinical Q&A."
+      ],
+      "expected": [
+        [
+          "Microsoft"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Microsoft"
+        ]
+      ]
+    },
+    {
+      "id": "tp-multi-word-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a three-word company name that starts the sentence (rule 3)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Tata Consultancy Services offered me a summer role in semantic search."
+      ],
+      "expected": [
+        [
+          "Tata Consultancy Services"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Consultancy",
+          "Services",
+          "Tata"
+        ]
+      ]
+    },
+    {
+      "id": "tp-corpus-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a company from the job corpus that starts the sentence (rule 3, corpus)",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Groww's analytics team hired me to build retrieval pipelines."
+      ],
+      "expected": [
+        [
+          "Groww"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Groww"
+        ]
+      ]
+    },
+    {
+      "id": "tp-two-word-tool-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: a two-word name from the curated list that starts the sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Hugging Face models power every demo I have shipped."
+      ],
+      "expected": [
+        [
+          "Hugging Face"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Face",
+          "Hugging"
+        ]
+      ]
+    },
+    {
+      "id": "tn-target-company-at-sentence-start",
+      "kind": "synthetic",
+      "provenance": "synthetic: the target company starting a sentence is not a claim",
+      "job": {
+        "title": "AI Engineer",
+        "company": "databricks"
+      },
+      "paragraphs": [
+        "Databricks is where I want to apply my RAG and FAISS work."
+      ],
+      "expected": [
+        []
+      ],
+      "bullet_rules_flags": [
+        []
+      ]
+    },
+    {
+      "id": "tn-known-entity-in-the-profile",
+      "kind": "synthetic",
+      "provenance": "synthetic: a known entity the profile has, starting a sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Sentence Transformers and FAISS power my retrieval work."
+      ],
+      "expected": [
+        []
+      ],
+      "bullet_rules_flags": [
+        []
+      ]
+    }
+  ],
+  "known_misses": [
+    {
+      "id": "miss-unknown-company-at-sentence-start",
+      "kind": "known_miss",
+      "provenance": "synthetic: a company in none of rule 3's lists (corpus, taxonomy, curated) that starts the sentence",
+      "job": {
+        "title": "AI Engineer",
+        "company": "acme"
+      },
+      "paragraphs": [
+        "Zyphra hired me as a machine learning intern."
+      ],
+      "expected": [
+        [
+          "Zyphra"
+        ]
+      ],
+      "bullet_rules_flags": [
+        [
+          "Zyphra"
         ]
       ]
     }

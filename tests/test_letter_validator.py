@@ -1,14 +1,17 @@
 """The cover-letter validator (backend/resume_engine/letter_validator.py) on
 the labelled fixture in tests/fixtures/letter_validator/: zero flags on the
-three real Phase 5 letters, every synthetic fabrication still flagged, and
-the old (resume-bullet) rules' output pinned so bullet validation provably
-didn't change. Pure: no database, no LLM. Run with -s for the table."""
+three real Phase 5 letters, every synthetic fabrication flagged (including
+names that start a sentence), no flag on the target company or a name the
+profile has, and the resume-bullet validator's output on the same text
+pinned, so bullet validation provably didn't change. Pure: no database,
+no LLM. Run with -s for the table."""
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from backend.resume_engine import cover_letter
+from backend.resume_engine import cover_letter, letter_validator
 from backend.resume_engine.letter_validator import validate_letter_paragraph
 from backend.resume_engine.validate_tailored import validate_bullet
 
@@ -18,16 +21,39 @@ PROFILE = DATA["profile"]
 CASES, MISSES = DATA["cases"], DATA["known_misses"]
 
 
-def _flags(case, letter_rules):
+@pytest.fixture(autouse=True)
+def _fixture_corpus(monkeypatch):
+    """Rule 3's corpus companies are the fixture's own list."""
+    monkeypatch.setattr(letter_validator, "corpus_companies",
+                        lambda: frozenset(DATA["corpus_companies"]))
+
+
+def _flags(case):
     review = {r["paragraph"]: r["flags"] for r in cover_letter.letter_review(
-        case["paragraphs"], PROFILE, case["job"], letter_rules=letter_rules)}
+        case["paragraphs"], PROFILE, case["job"], letter_rules=True)}
     return [sorted(review.get(i, [])) for i in range(1, len(case["paragraphs"]) + 1)]
 
 
-def _scores(cases, letter_rules):
+def _bullet_flags(case):
+    """The resume-bullet validator on each paragraph, filtered the way a
+    letter review filters (company and title words are not flags)."""
+    evidence = cover_letter._profile_evidence_text(PROFILE)
+    skills = [s["skill"] for s in PROFILE["skills"]]
+    job = case["job"]
+    expected = {(job.get("company") or "").lower(),
+                *(w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title") or ""))}
+    out = []
+    for paragraph in case["paragraphs"]:
+        r = validate_bullet(paragraph, evidence, skills)
+        out.append(sorted([t for t in r["flagged_terms"] if t.lower() not in expected]
+                          + r["flagged_numbers"]))
+    return out
+
+
+def _scores(cases, flags):
     tp = fp = fn = 0
     for case in cases:
-        for got, want in zip(_flags(case, letter_rules), case["expected"]):
+        for got, want in zip(flags(case), case["expected"]):
             tp += len(set(got) & set(want))
             fp += len(set(got) - set(want))
             fn += len(set(want) - set(got))
@@ -42,7 +68,11 @@ def test_the_fixture_has_the_three_real_letters_and_the_required_fabrications():
     assert [c["id"] for c in real] == ["real-6", "real-7", "real-8"]
     assert sum(len(c["paragraphs"]) for c in real) == 12
     expected = {f for c in CASES if c["kind"] == "synthetic" for p in c["expected"] for f in p}
-    assert {"Kubernetes", "40%", "Google", "Spark-based"} <= expected
+    assert {"Kubernetes", "40%", "Google", "Spark-based", "Kafka-backed", "Microsoft",
+            "Tata Consultancy Services", "Groww", "Hugging Face"} <= expected
+    starts = [c["paragraphs"][0] for c in CASES if c["id"] in (
+        "tp-company-at-sentence-start", "tp-company-after-at")]
+    assert starts[0].startswith("Google hired me") and starts[1].startswith("At Microsoft, I")
     for c in CASES + MISSES:
         assert len(c["expected"]) == len(c["paragraphs"]) == len(c["bullet_rules_flags"])
 
@@ -50,42 +80,42 @@ def test_the_fixture_has_the_three_real_letters_and_the_required_fabrications():
 @pytest.mark.parametrize("case", [c for c in CASES if c["kind"] == "real"],
                          ids=lambda c: c["id"])
 def test_the_real_letters_raise_no_flags(case):
-    assert _flags(case, letter_rules=True) == [[] for _ in case["paragraphs"]]
+    assert _flags(case) == [[] for _ in case["paragraphs"]]
 
 
 @pytest.mark.parametrize("case", [c for c in CASES if c["kind"] == "synthetic"],
                          ids=lambda c: c["id"])
-def test_every_synthetic_fabrication_is_still_flagged(case):
-    assert _flags(case, letter_rules=True) == case["expected"]
+def test_every_synthetic_case_is_flagged_exactly_as_labelled(case):
+    assert _flags(case) == case["expected"]
 
 
 @pytest.mark.parametrize("case", MISSES, ids=lambda c: c["id"])
 def test_the_known_misses_are_what_the_docs_say(case):
-    # The sentence-start rule's cost: flagged by the old rules, not by these.
-    assert _flags(case, letter_rules=False) == case["expected"]
-    assert _flags(case, letter_rules=True) == [[] for _ in case["paragraphs"]]
+    # A name in none of rule 3's lists that starts a sentence: the old rules
+    # flagged it (with every other sentence starter); these don't.
+    assert _bullet_flags(case) == case["expected"]
+    assert _flags(case) == [[] for _ in case["paragraphs"]]
 
 
 @pytest.mark.parametrize("case", CASES + MISSES, ids=lambda c: c["id"])
-def test_the_bullet_rules_output_is_unchanged(case):
-    """letter_rules=False is the resume-bullet validator (validate_bullet),
-    which the v1 UI and CLI keep using: its output on every paragraph is
-    the one captured before the letter rules existed."""
-    assert _flags(case, letter_rules=False) == case["bullet_rules_flags"]
+def test_the_bullet_validators_output_is_unchanged(case):
+    """validate_bullet (resume bullets) on every paragraph gives exactly the
+    output captured before the letter rules existed."""
+    assert _bullet_flags(case) == case["bullet_rules_flags"]
 
 
 def test_precision_and_recall_before_and_after():
-    before, after = _scores(CASES, False), _scores(CASES, True)
+    before, after = _scores(CASES, _bullet_flags), _scores(CASES, _flags)
+    with_misses = _scores(CASES + MISSES, _flags)
     print(f"\n[letter-validator] before (bullet rules): {before}")
     print(f"[letter-validator] after  (letter rules): {after}")
-    print(f"[letter-validator] with the known misses, after: {_scores(CASES + MISSES, True)}")
-    assert before == {"tp": 5, "fp": 19, "fn": 0, "precision": 0.208, "recall": 1.0}
-    assert after == {"tp": 5, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0}
-    assert _scores(CASES + MISSES, True) == {"tp": 5, "fp": 0, "fn": 2,
-                                             "precision": 1.0, "recall": 0.714}
+    print(f"[letter-validator] with the known misses, after: {with_misses}")
+    assert before == {"tp": 9, "fp": 24, "fn": 2, "precision": 0.273, "recall": 0.818}
+    assert after == {"tp": 11, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0}
+    assert with_misses == {"tp": 11, "fp": 0, "fn": 1, "precision": 1.0, "recall": 0.917}
 
 
-# ---- the two rules, one at a time ------------------------------------------------
+# ---- the rules, one at a time ------------------------------------------------
 
 EVIDENCE = "Built a RAG pipeline with FAISS and Sentence Transformers for clinical Q&A."
 SKILLS = ["RAG", "FAISS", "Sentence Transformers"]
@@ -169,3 +199,61 @@ def test_agent_edits_use_the_letter_rules():
         "This RAG work ran on Kubernetes."]})
     assert flagged.flags == [{"document": "cover_letter", "paragraph": 1,
                               "flags": ["Kubernetes"]}]
+
+
+@pytest.mark.parametrize("text, flagged", [
+    ("Google hired me as an intern.", ["Google"]),                # curated list
+    ("Kubernetes runs my RAG service.", ["Kubernetes"]),
+    ("Docker-based FAISS search.", ["Docker-based"]),             # a hyphenated head
+    ("RAG-Kubernetes pipelines run here.", ["RAG-Kubernetes"]),   # every part checked
+    ("Tata Consultancy Services, Google and I.", ["Google", "Tata Consultancy Services"]),
+    ("I worked at Hugging Face.", ["Hugging Face"]),              # one term, mid-sentence
+    ("Acme hired me.", ["Acme"]),                                 # a corpus company
+    ("Sentence Transformers power it.", []),                      # the profile has it
+    ("FAISS and RAG power it.", []),
+    ("Hello. Google? No. Amazon! Kubernetes.", ["Amazon", "Google", "Kubernetes"]),
+])
+def test_rule_3_known_names_that_start_a_sentence(text, flagged, monkeypatch):
+    monkeypatch.setattr(letter_validator, "corpus_companies", lambda: frozenset({"acme"}))
+    assert _terms(text) == flagged
+
+
+def test_rule_3_never_flags_the_target_company():
+    for company in ("Google", "google", "Tata Consultancy Services", "OpenAI"):
+        text = f"{company} is where I want to apply my RAG work."
+        assert validate_letter_paragraph(text, EVIDENCE, SKILLS,
+                                         target_company=company)["flagged_terms"] == []
+    assert validate_letter_paragraph("Google hired me.", EVIDENCE, SKILLS,
+                                     target_company="microsoft")["flagged_terms"] == ["Google"]
+
+
+def test_rule_3_reads_the_corpus_companies_from_the_json_corpus(tmp_path, monkeypatch):
+    from backend.database import corpus
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps([{"title": "AI Engineer", "company": "Zyphra"}]),
+                    encoding="utf-8")
+    monkeypatch.setattr(corpus, "JOBS_FILE", jobs)
+    monkeypatch.setattr(letter_validator, "corpus_companies",
+                        letter_validator._corpus_companies)
+    monkeypatch.setattr(letter_validator, "_corpus_cache", None)
+    assert letter_validator.corpus_companies() == frozenset({"Zyphra"})
+    assert _terms("Zyphra hired me.") == ["Zyphra"]
+    jobs.write_text(json.dumps([{"title": "AI Engineer", "company": "Other"}]),
+                    encoding="utf-8")
+    assert letter_validator.corpus_companies() == frozenset({"Zyphra"})   # cached
+    monkeypatch.setattr(letter_validator, "_corpus_cache", None)
+    assert letter_validator.corpus_companies() == frozenset({"Other"})
+
+
+def test_rule_3_without_a_corpus_still_has_its_curated_lists(monkeypatch):
+    from backend.database import corpus
+
+    def broken(*a, **kw):
+        raise OSError("no corpus")
+    monkeypatch.setattr(corpus, "load_corpus_snapshot", broken)
+    monkeypatch.setattr(letter_validator, "corpus_companies",
+                        letter_validator._corpus_companies)
+    monkeypatch.setattr(letter_validator, "_corpus_cache", None)
+    assert letter_validator.corpus_companies() == frozenset()
+    assert letter_validator.entity_key("Hugging Face") in letter_validator.known_entities()
+    assert _terms("Microsoft hired me.") == ["Microsoft"]

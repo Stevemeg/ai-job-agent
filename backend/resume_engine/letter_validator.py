@@ -32,15 +32,31 @@ inflections). Two rules differ, both for letters only:
 (And "e.g" / "i.e", which the term pattern reads as dotted tokens, are
 prose, not tools.)
 
-Known trade-off of rule 1: an unlisted company or tool that STARTS a
-sentence ("Google hired me as an intern.") is not flagged unless it is
-also tech-like by rule 2's tests or in the taxonomy. The same claim
-mid-sentence ("an internship at Google") is. The fixture in
-tests/fixtures/letter_validator/ records it.
+3. Known entities. Rule 1 alone would let a name slip through by starting
+   a sentence ("Google hired me as an intern."). So a sentence-initial
+   word -- or its first one to three words, for names like "Tata
+   Consultancy Services", or the first part of a hyphenated token
+   ("Kafka-backed") -- that is a KNOWN ENTITY is flagged unless the
+   profile evidence has it or it is the target company. Known entities:
+     - every company in the job corpus (canonical_jobs; the JSON corpus
+       without a database), read through corpus_companies() and cached
+       for CORPUS_CACHE_S,
+     - the skill taxonomy (skill_taxonomy.SKILL_ALIASES, names and
+       aliases),
+     - KNOWN_COMPANIES and KNOWN_TOOLS below: a short curated list of big
+       companies and widely used tools.
+   Names compare on letters and digits only ("Hugging Face" =
+   "huggingface"). The cost: a corpus company that is also an English
+   word ("Linear", "Modal", "Ramp") is flagged when it starts a sentence
+   and the profile doesn't mention it. A name in none of the three lists
+   that starts a sentence is still not flagged; mid-sentence, any
+   capitalized name is. tests/fixtures/letter_validator/ records both.
 """
 from __future__ import annotations
 
 import re
+import threading
+import time
 
 from .validate_tailored import (SKILL_ALIASES, _COMMON_WORDS, _TERM_RE, _alias_forms,
                                 _extract_numbers, _norm, _stem)
@@ -55,7 +71,77 @@ _TAXONOMY = frozenset(SKILL_ALIASES) | frozenset(a for forms in SKILL_ALIASES.va
                                                 for a in forms)
 _LAST_WORD = re.compile(r"([A-Za-z][A-Za-z.]*)\.$")
 
-__all__ = ["validate_letter_paragraph"]
+# Rule 3's curated lists (rule 3 also uses the corpus and the taxonomy).
+KNOWN_COMPANIES = (
+    "Google", "Alphabet", "DeepMind", "Microsoft", "Apple", "Amazon", "AWS", "Meta",
+    "Facebook", "Instagram", "WhatsApp", "Netflix", "NVIDIA", "Intel", "AMD", "IBM",
+    "Oracle", "Salesforce", "Adobe", "Uber", "Tesla", "Twitter", "LinkedIn", "Samsung",
+    "Qualcomm", "Cisco", "SAP", "VMware", "OpenAI", "Anthropic", "Hugging Face",
+    "Mistral AI", "Cohere", "Infosys", "TCS", "Tata Consultancy Services", "Wipro",
+    "HCL", "Accenture", "Deloitte", "Capgemini", "Cognizant", "Flipkart", "Paytm",
+    "Swiggy", "Zomato", "Razorpay", "PhonePe")
+KNOWN_TOOLS = (
+    "Kubernetes", "Docker", "Kafka", "Spark", "Hadoop", "Airflow", "Snowflake", "Tableau",
+    "Terraform", "Jenkins", "TensorFlow", "PyTorch", "Keras", "LangChain", "LlamaIndex",
+    "MongoDB", "PostgreSQL", "MySQL", "Redis", "Elasticsearch", "Azure", "GCP",
+    "BigQuery", "Databricks", "Pinecone", "Weaviate", "Kotlin", "Golang", "Django",
+    "FastAPI", "React", "Angular")
+CORPUS_CACHE_S = 600.0
+_MAX_NAME_WORDS = 3
+
+__all__ = ["validate_letter_paragraph", "known_entities", "corpus_companies",
+           "entity_key", "KNOWN_COMPANIES", "KNOWN_TOOLS"]
+
+
+def entity_key(name) -> str:
+    """A name on its letters and digits, case-folded: "Hugging Face",
+    "hugging-face" and "huggingface" are one key."""
+    return re.sub(r"[^0-9a-z]", "", str(name or "").casefold())
+
+
+_STATIC_KEYS = frozenset(k for k in map(entity_key, (*KNOWN_COMPANIES, *KNOWN_TOOLS,
+                                                    *_TAXONOMY)) if k)
+_corpus_lock = threading.Lock()
+_corpus_cache = None                    # (monotonic time, frozenset of names)
+
+
+def _corpus_companies() -> frozenset:
+    """Every company in the job corpus: canonical_jobs when a database is
+    configured and reachable, else the JSON corpus. Cached for
+    CORPUS_CACHE_S. Never raises: no corpus means no corpus names."""
+    global _corpus_cache
+    now = time.monotonic()
+    cached = _corpus_cache
+    if cached is not None and now - cached[0] < CORPUS_CACHE_S:
+        return cached[1]
+    with _corpus_lock:
+        try:
+            from ..database import corpus
+            if corpus.db_available():
+                from sqlalchemy import text
+                from ..database.db import get_engine
+                with get_engine().connect() as conn:
+                    names = conn.execute(text(
+                        "SELECT DISTINCT company FROM canonical_jobs "
+                        "WHERE content_hash IS NOT NULL")).scalars().all()
+            else:
+                names = [j.get("company") for j in corpus.load_corpus_snapshot().jobs]
+            found = frozenset(n for n in names if n)
+        except Exception:                                   # noqa: BLE001
+            found = frozenset()
+        _corpus_cache = (now, found)
+        return found
+
+
+# Indirection so tests can pin the corpus part (tests/conftest.py does).
+corpus_companies = _corpus_companies
+
+
+def known_entities(extra=()) -> frozenset:
+    """Rule 3's keys: the curated lists, the taxonomy, the corpus's
+    companies and `extra` names."""
+    return _STATIC_KEYS | frozenset(
+        k for k in map(entity_key, (*corpus_companies(), *extra)) if k)
 
 
 def _at_sentence_start(text: str, start: int) -> bool:
@@ -121,15 +207,58 @@ def _unverified(token: str, at_start: bool, evidence: _Evidence) -> bool:
     return False
 
 
-def validate_letter_paragraph(paragraph: str, source_text: str,
-                              allowed_skills=()) -> dict:
+def _entity_at(paragraph: str, tokens: list, i: int, entities: frozenset):
+    """Rule 3: the known entity starting at token i, as (name as written,
+    index of its last token) -- the longest of its first 1..3 words
+    (joined by spaces only) or, for a hyphenated token, its first part
+    (the whole token is the name). None if no known entity starts there."""
+    first = tokens[i].group(0)
+    if not first[:1].isupper():
+        return None
+    if "-" in first:
+        return (first, i) if entity_key(first.split("-", 1)[0]) in entities else None
+    best = None
+    for j in range(i, min(i + _MAX_NAME_WORDS, len(tokens))):
+        if j > i and paragraph[tokens[j - 1].end():tokens[j].start()].strip():
+            break                                # "Google, ..." ends the name
+        name = paragraph[tokens[i].start():tokens[j].end()]
+        if entity_key(name) in entities:
+            best = (name, j)
+    return best
+
+
+def validate_letter_paragraph(paragraph: str, source_text: str, allowed_skills=(), *,
+                              target_company=None, entities=None) -> dict:
     """Check one cover-letter paragraph against everything the candidate
-    can claim (cover_letter._profile_evidence_text). Returns {"ok": bool,
-    "flagged_terms": [...], "flagged_numbers": [...]}, like validate_bullet."""
+    can claim (cover_letter._profile_evidence_text). The target company
+    is never a rule-3 flag (a letter names it); `entities` defaults to
+    known_entities(). Returns {"ok": bool, "flagged_terms": [...],
+    "flagged_numbers": [...]}, like validate_bullet."""
     evidence = _Evidence(source_text, allowed_skills)
-    flagged_terms = {m.group(0) for m in _TERM_RE.finditer(paragraph)
-                     if _unverified(m.group(0), _at_sentence_start(paragraph, m.start()),
-                                    evidence)}
+    entities = known_entities() if entities is None else entities
+    target = entity_key(target_company)
+    tokens = list(_TERM_RE.finditer(paragraph))
+    flagged_terms = set()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i].group(0)
+        at_start = _at_sentence_start(paragraph, tokens[i].start())
+        found = _entity_at(paragraph, tokens, i, entities)
+        # A known name is one term: at a sentence start any known name
+        # (rule 3), elsewhere a multi-word one ("at Hugging Face" is one
+        # claim, not "Hugging" and "Face").
+        if found is not None and (at_start or " " in found[0]):
+            name, last = found
+            hyphenated = " " not in name and "-" in name
+            head = name.split("-", 1)[0] if hyphenated else name
+            if (entity_key(head) != target and not evidence.verifies(head)) or (
+                    hyphenated and _unverified(name, at_start, evidence)):
+                flagged_terms.add(name)          # (a hyphenated one: every part checked)
+            i = last + 1
+            continue
+        if _unverified(token, at_start, evidence):
+            flagged_terms.add(token)
+        i += 1
 
     # Numbers: exactly validate_bullet's check.
     source_numeric = {re.sub(r"[^\d.]", "", n) for n in _extract_numbers(source_text)}
