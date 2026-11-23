@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy import TIMESTAMP, bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -190,13 +190,15 @@ _CLAIM = text("""
 """)
 
 
-def claim(worker_id: str, kinds: Iterable[str],
-          lease_s: float) -> ClaimedTask | None:
+def claim(worker_id: str, kinds: Iterable[str], lease_s: float, *,
+          on_dead: Callable[[dict], None] | None = None) -> ClaimedTask | None:
     """Take the oldest claimable task of one of `kinds`, or None.
 
     Claimable: queued with run_after <= now(), or running with an expired
     lease. attempts is incremented here. Reclaimed tasks with no attempts
-    left are marked dead (and the next candidate is tried)."""
+    left are marked dead (and the next candidate is tried); each one is
+    passed to on_dead (the row: id, kind, payload, last_error, ...) after
+    its transaction commits. An on_dead error is logged, never raised."""
     kinds = sorted(set(kinds))
     if not kinds:
         raise ValueError("claim() needs at least one task kind")
@@ -212,6 +214,11 @@ def claim(worker_id: str, kinds: Iterable[str],
         if row["status"] == "dead":
             log.error("task %s (%s) is dead: %s, no attempts left",
                       row["id"], row["kind"], row["last_error"])
+            if on_dead is not None:
+                try:
+                    on_dead(dict(row))
+                except Exception:                           # noqa: BLE001
+                    log.exception("task %s: on_dead hook failed", row["id"])
             continue
         return ClaimedTask(
             id=row["id"], kind=row["kind"], payload=row["payload"] or {},

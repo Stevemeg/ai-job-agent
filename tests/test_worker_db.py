@@ -79,6 +79,41 @@ def test_unserializable_handler_result_fails_the_attempt(pg):
     assert _row(pg, task_id)["last_error"].startswith("TypeError")
 
 
+def test_the_dead_handler_runs_once_when_a_task_dies(pg):
+    died = []
+    failing = taskqueue.enqueue("boom", {"n": 1}, max_attempts=2)
+
+    def boom(payload, ctx):
+        raise ValueError("kaput")
+
+    def broken_dead_handler(payload, error):
+        raise RuntimeError("a dead handler error is logged, not raised")
+
+    worker = Worker({"boom": boom, "slow": lambda p, c: None}, lease_s=30,
+                    dead_handlers={"boom": lambda p, e: died.append((p, e)),
+                                   "slow": broken_dead_handler,
+                                   "not_mine": lambda p, e: None})
+    assert set(worker.dead_handlers) == {"boom", "slow"}
+    assert worker.run_once().outcome == "failed"
+    assert died == []                                    # attempts left
+    _make_due(pg, failing)
+    assert worker.run_once().outcome == "failed"         # the last attempt
+    assert [(p, e.split("\n", 1)[0]) for p, e in died] == [({"n": 1},
+                                                           "ValueError: kaput")]
+
+    # Dead through lease expiry on the final attempt: claim() marks it.
+    stuck = taskqueue.enqueue("slow", {"n": 2}, max_attempts=1)
+    assert taskqueue.claim("gone", ["slow"], 30).id == stuck
+    _expire_lease(pg, stuck)
+    assert worker.run_once() is None                     # handler raised: logged
+    assert _row(pg, stuck)["status"] == "dead"
+    stuck2 = taskqueue.enqueue("boom", {"n": 3}, max_attempts=1)
+    assert taskqueue.claim("gone", ["boom"], 30).id == stuck2
+    _expire_lease(pg, stuck2)
+    assert worker.run_once() is None
+    assert died[-1] == ({"n": 3}, "lease expired (worker gone, attempt 1/1)")
+
+
 # ---- concurrency ------------------------------------------------------------------
 
 def test_two_workers_claiming_20_tasks_run_each_exactly_once(pg):

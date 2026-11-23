@@ -21,6 +21,10 @@ handler registered for each task's kind:
 Handlers are `handler(payload: dict, ctx: TaskContext) -> dict | None`;
 the return value is stored as the task's result. Raising fails the attempt
 (retried with backoff until max_attempts, then dead).
+
+Dead handlers, `dead_handler(payload: dict, last_error: str | None)`, run
+once a task of their kind is dead: its final attempt raised, or a worker
+found its lease expired with no attempts left.
 """
 from __future__ import annotations
 
@@ -70,6 +74,7 @@ class TaskContext:
 
 
 Handler = Callable[[dict, TaskContext], Optional[dict]]
+DeadHandler = Callable[[dict, Optional[str]], None]
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,10 @@ def default_handlers() -> dict[str, Handler]:
     from ..services.ranking import RANK_KIND, run_rank_task
     from ..services.scan import SCAN_KIND, run_scan_task
     return {RANK_KIND: run_rank_task, SCAN_KIND: run_scan_task}
+
+
+def default_dead_handlers() -> dict[str, DeadHandler]:
+    return {}
 
 
 def _format_error(exc: BaseException) -> str:
@@ -135,10 +144,14 @@ class Worker:
                  lease_s: float = DEFAULT_LEASE_S,
                  grace_s: float = DEFAULT_GRACE_S,
                  poll_min_s: float = DEFAULT_POLL_MIN_S,
-                 poll_max_s: float = DEFAULT_POLL_MAX_S):
+                 poll_max_s: float = DEFAULT_POLL_MAX_S,
+                 dead_handlers: dict[str, DeadHandler] | None = None):
         self.handlers = dict(default_handlers() if handlers is None else handlers)
         if not self.handlers:
             raise ValueError("a worker needs at least one handler")
+        # Default: the built-in dead handlers for the kinds this worker runs.
+        dead = default_dead_handlers() if dead_handlers is None else dead_handlers
+        self.dead_handlers = {k: h for k, h in dead.items() if k in self.handlers}
         if lease_s <= 0 or poll_min_s <= 0 or poll_max_s < poll_min_s:
             raise ValueError("need lease_s > 0 and 0 < poll_min_s <= poll_max_s")
         self.worker_id = worker_id or make_worker_id()
@@ -158,10 +171,24 @@ class Worker:
     def run_once(self) -> RunResult | None:
         """Claim one task and run it to completion in the calling thread
         (heartbeating meanwhile). None if nothing was claimable."""
-        task = taskqueue.claim(self.worker_id, self.kinds, self.lease_s)
+        task = taskqueue.claim(self.worker_id, self.kinds, self.lease_s,
+                               on_dead=self._on_dead_row)
         if task is None:
             return None
         return self._execute(task)
+
+    def _on_dead(self, kind: str, payload: dict, error: str | None) -> None:
+        handler = self.dead_handlers.get(kind)
+        if handler is None:
+            return
+        try:
+            handler(payload or {}, error)
+        except Exception:                                   # noqa: BLE001
+            log.exception("dead handler for %s failed", kind)
+
+    def _on_dead_row(self, row: dict) -> None:
+        # A task whose lease ran out on its final attempt (claim() marked it).
+        self._on_dead(row["kind"], row.get("payload") or {}, row.get("last_error"))
 
     def _execute(self, task: taskqueue.ClaimedTask) -> RunResult:
         log.info("task %s (%s) claimed by %s, attempt %d/%d", task.id,
@@ -188,6 +215,8 @@ class Worker:
                         error.split("\n", 1)[0])
             ok = taskqueue.fail(task.id, self.worker_id, error)
             outcome = "failed" if ok else "fenced"
+            if ok and task.attempts >= task.max_attempts:   # fail() made it dead
+                self._on_dead(task.kind, task.payload, error)
         if outcome == "succeeded":
             log.info("task %s (%s) succeeded", task.id, task.kind)
         return RunResult(task_id=task.id, kind=task.kind,
