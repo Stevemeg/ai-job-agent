@@ -87,3 +87,29 @@ def open_checkpointer() -> Iterator:
 
 def thread_config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
+
+
+def run_thread(builder, thread_id: str, initial_state: dict) -> dict:
+    """Run a StateGraph builder on `thread_id` to the end and return the
+    final state -- resuming instead of restarting when the thread already
+    has checkpoints:
+
+      no checkpoint yet          -> invoke(initial_state)  (a first attempt)
+      checkpoint, steps pending  -> invoke(None): resume at the pending node
+                                    (a retry after a crash or an error)
+      checkpoint, graph finished -> the saved final state, nothing re-runs
+                                    (the worker died between the graph's
+                                    end and recording the task's success)
+
+    Every step is checkpointed synchronously (DURABILITY)."""
+    config = thread_config(thread_id)
+    with open_checkpointer() as saver:
+        graph = builder.compile(checkpointer=saver)
+        if saver.get_tuple(config) is None:
+            return graph.invoke(initial_state, config, durability=DURABILITY)
+        snapshot = graph.get_state(config)
+        if snapshot.next:
+            log.info("%s: resuming at %s", thread_id, ", ".join(snapshot.next))
+            return graph.invoke(None, config, durability=DURABILITY)
+        log.info("%s: already finished; returning its final state", thread_id)
+        return dict(snapshot.values)

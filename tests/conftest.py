@@ -218,3 +218,21 @@ def agent_db(pg, monkeypatch):
     checkpoint.reset()
     yield pg
     checkpoint.reset()
+
+
+AGENT_ENV_VARS = ("AGENT_ENABLED", "AGENT_MIN_SCORE", "AGENT_MAX_JOB_AGE_DAYS",
+                  "AGENT_MAX_DRAFTS_PER_RUN")
+
+
+@pytest.fixture
+def agent_env(agent_db, fake_llm, rank_files, stub_semantic, tmp_path, monkeypatch):
+    """Everything the agent graphs touch, isolated: the throwaway schema
+    (with the checkpointer), the fake LLM, the profile and ranked file under
+    tmp_path, the embedding similarity stubbed, and the AGENT_* settings at
+    their defaults."""
+    from types import SimpleNamespace
+    apps = tmp_path / "applications"
+    for var in AGENT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return SimpleNamespace(pg=agent_db, llm=fake_llm, apps=apps,
+                           profile_file=rank_files[0], ranked_file=rank_files[1])
