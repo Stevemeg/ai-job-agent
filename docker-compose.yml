@@ -93,7 +93,7 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-auto}
       AGENT_ENABLED: ${AGENT_ENABLED:-false}
-      AGENT_MIN_SCORE: ${AGENT_MIN_SCORE:-80}
+      AGENT_MIN_SCORE: ${AGENT_MIN_SCORE:-20}
       AGENT_MAX_JOB_AGE_DAYS: ${AGENT_MAX_JOB_AGE_DAYS:-14}
       AGENT_MAX_DRAFTS_PER_RUN: ${AGENT_MAX_DRAFTS_PER_RUN:-5}
       AGENT_LOCATIONS: ${AGENT_LOCATIONS:-}                # empty: the built-in Indian city list

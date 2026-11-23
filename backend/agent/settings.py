@@ -3,7 +3,10 @@ settings.py -- the agent's AGENT_* settings, read from the environment on
 every call (a changed .env takes effect with the next run, no restart).
 
   AGENT_ENABLED               false   scans chain an agent run when true
-  AGENT_MIN_SCORE             80      triage: match_score >= this
+  AGENT_MIN_SCORE             20      triage: match_score >= this (about the
+                                      90th percentile of the real corpus's
+                                      eligible, gate-passing jobs;
+                                      CONFIGURATION.md)
   AGENT_MAX_JOB_AGE_DAYS      14      triage: job last seen within this many days
   AGENT_MAX_DRAFTS_PER_RUN    5       triage: at most this many new applications
   AGENT_LOCATIONS             Bengaluru, Bangalore, Hyderabad, Pune, Chennai,
@@ -31,7 +34,7 @@ _FALSE = {"0", "false", "no", "off", ""}
 @dataclass(frozen=True)
 class AgentSettings:
     enabled: bool = False
-    min_score: float = 80.0
+    min_score: float = 20.0
     max_job_age_days: int = 14
     max_drafts_per_run: int = 5
     locations: tuple[str, ...] = DEFAULT_LOCATIONS

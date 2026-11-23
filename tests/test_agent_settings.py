@@ -6,7 +6,14 @@ from backend.agent.settings import AgentSettings, settings_from_env
 
 def test_defaults():
     assert settings_from_env({}) == AgentSettings(
-        enabled=False, min_score=80.0, max_job_age_days=14, max_drafts_per_run=5)
+        enabled=False, min_score=20.0, max_job_age_days=14, max_drafts_per_run=5)
+
+
+def test_the_min_score_default_is_20():
+    # Phase 6 review decision: ~p90 of the real corpus's location-eligible,
+    # gate-passing scores (max 30.38) -- 80 triaged nothing at all.
+    assert AgentSettings().min_score == 20.0
+    assert settings_from_env({"AGENT_MIN_SCORE": ""}).min_score == 20.0
 
 
 def test_values_are_parsed():

@@ -48,7 +48,7 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `SCAN_MISFIRE_GRACE_S` | env / `.env` | `3600` | How late a missed scan may still run, in seconds. If the scheduler was down at the fire time and comes back within this window, the slot runs once; after that it is skipped. Several missed slots run once |
 | `LLM_PROVIDER` | env | `auto` | `auto`, `groq`, `ollama` or `fake` (see above) |
 | `AGENT_ENABLED` | env / `.env` (worker) | `false` | When `true`, every scan queues an agent run as its last step. Manual runs (`POST /v1/agent/runs`) work either way |
-| `AGENT_MIN_SCORE` | env / `.env` (worker) | `80` | Triage: a job's `match_score` must be at least this |
+| `AGENT_MIN_SCORE` | env / `.env` (worker) | `20` | Triage: a job's `match_score` must be at least this ([why 20](#why-agent_min_score-is-20)) |
 | `AGENT_MAX_JOB_AGE_DAYS` | env / `.env` (worker) | `14` | Triage: the job must have been seen by a scan within this many days (`last_seen_at`) |
 | `AGENT_MAX_DRAFTS_PER_RUN` | env / `.env` (worker) | `5` | Triage: at most this many new applications per run (`0` drafts nothing) |
 | `AGENT_LOCATIONS` | env / `.env` (worker) | `Bengaluru, Bangalore, Hyderabad, Pune, Chennai, Mumbai, Gurgaon, Gurugram, Noida, Delhi, NCR, India` | Triage: comma-separated. A job's location, or one of its postings', must contain one of these as whole words (case and spacing ignored) |
@@ -77,8 +77,18 @@ Location rules (triage only; scoring and ranking never look at them): a location
 Drafts go to `data/applications/<application_id>/`. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#agent-dry-run) and [API.md](docs/API.md#agent-phase-4-dry-run).
 
 ```bash
-AGENT_ENABLED=true AGENT_MIN_SCORE=75 DB_HOST=localhost python -m backend.worker
+AGENT_ENABLED=true AGENT_MIN_SCORE=25 DB_HOST=localhost python -m backend.worker
 ```
+
+### Why `AGENT_MIN_SCORE` is 20
+
+`match_score` is not a percentage, and real scores are low. On the real corpus (3,875 jobs, one real profile, measured for the Phase 5 review), the jobs triage could ever take (in an `AGENT_LOCATIONS` location, seen within 14 days, passed the hard gates) were 41, with these scores:
+
+| max | p99 | p95 | p90 | p75 | p50 | min |
+|---|---|---|---|---|---|---|
+| 30.38 | 29.15 | 26.97 | 21.62 | 17.96 | 15.09 | 2.88 |
+
+The old default, 80, was above the best score in the corpus, so triage took nothing. 20 sits just under the 90th percentile: roughly the best tenth of the jobs the agent may draft for, which with `AGENT_MAX_DRAFTS_PER_RUN=5` is a handful of drafts per run rather than none or all of them. It only gates triage; it changes no score. Re-check it when the profile, the corpus or the scoring formula changes (the score distribution moves with all three), and raise it if the Inbox fills with weak matches.
 
 ## Approvals and Gmail drafts (Phase 5)
 
