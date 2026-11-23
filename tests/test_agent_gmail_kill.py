@@ -23,7 +23,7 @@ from backend.agent import application_graph, checkpoint, decisions, run_graph, s
 from backend.database import corpus               # noqa: E402
 from backend.llm.fake_provider import read_call_log  # noqa: E402
 from backend.worker import Worker                 # noqa: E402
-from tests._fake_gmail import FakeGmailSession    # noqa: E402
+from _fake_gmail import FakeGmailSession    # noqa: E402
 
 pytestmark = pytest.mark.db
 

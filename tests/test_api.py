@@ -195,19 +195,24 @@ def test_the_decision_endpoint_needs_a_database(client, monkeypatch):
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def test_every_mutating_route_requires_the_token():
+def test_every_mutating_route_requires_the_token(client, monkeypatch):
+    """Black-box: with API_TOKEN set, every POST/PUT/PATCH/DELETE route
+    answers 401 without the token -- including routes added later."""
     from fastapi.routing import APIRoute
-    from backend.api.auth import require_token
-    api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
-    routes = [r for r in api_routes if r.methods & MUTATING]
-    assert {r.path for r in routes} >= {
+    monkeypatch.setenv("API_TOKEN", "s3cret")
+    c, _ = client
+    routes = [(m, r.path) for r in app.routes if isinstance(r, APIRoute)
+              for m in sorted(r.methods & MUTATING)]
+    assert {p for _, p in routes} >= {
         "/v1/resumes", "/v1/profile", "/v1/rankings", "/v1/scans", "/v1/tracker/events",
         "/v1/agent/runs", "/v1/applications/{application_id}/decision"}
-    for r in routes:
-        assert any(d.call is require_token for d in r.dependant.dependencies), r.path
-    reads = [r for r in api_routes if not (r.methods & MUTATING)]
-    assert all(not any(d.call is require_token for d in r.dependant.dependencies)
-               for r in reads)
+    for method, path in routes:
+        url = path.replace("{application_id}", "1")
+        r = c.request(method, url, json={})
+        assert r.status_code == 401, (method, path, r.status_code)
+    # Reads never ask for it.
+    assert c.get("/v1/profile").status_code == 200
+    assert c.get("/healthz").status_code == 200
 
 
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"},

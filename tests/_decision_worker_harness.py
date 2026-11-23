@@ -24,11 +24,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))            # _fake_gmail
 
 from backend.agent import application_graph, decisions   # noqa: E402
 from backend.integrations import gmail_auth              # noqa: E402
 from backend.worker import Worker                        # noqa: E402
-from tests._fake_gmail import FakeGmailSession            # noqa: E402
+from _fake_gmail import FakeGmailSession            # noqa: E402
 
 
 def main() -> int:

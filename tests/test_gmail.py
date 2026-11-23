@@ -9,7 +9,7 @@ import pytest
 
 from backend.agent import packet
 from backend.integrations import gmail, gmail_auth
-from tests._fake_gmail import DRAFTS, FakeGmailSession
+from _fake_gmail import DRAFTS, FakeGmailSession
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ def test_find_by_message_id_scans_headers_when_search_lags(tmp_path):
 def test_an_api_error_is_raised_not_swallowed(tmp_path):
     class Refuses:
         def request(self, *args, **kwargs):
-            from tests._fake_gmail import FakeResponse
+            from _fake_gmail import FakeResponse
             return FakeResponse(403, {"error": "insufficient scope"})
     with pytest.raises(gmail.GmailApiError) as exc:
         gmail.create_draft(_message(tmp_path=tmp_path), session=Refuses())
@@ -142,13 +142,13 @@ def test_the_session_refreshes_an_expiring_token(tmp_path, monkeypatch):
 
     class HTTP:
         def post(self, url, data=None, timeout=None):
-            from tests._fake_gmail import FakeResponse
+            from _fake_gmail import FakeResponse
             seen.append(("POST", url, data["grant_type"]))
             return FakeResponse(200, {"access_token": "new", "expires_in": 3600,
                                       "scope": gmail_auth.SCOPE})
 
         def request(self, method, url, headers=None, timeout=None, **kwargs):
-            from tests._fake_gmail import FakeResponse
+            from _fake_gmail import FakeResponse
             seen.append((method, url, headers["Authorization"]))
             return FakeResponse(200, {"id": "d1"})
     session = gmail_auth._BearerSession(http=HTTP())

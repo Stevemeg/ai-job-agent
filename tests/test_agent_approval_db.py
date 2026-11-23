@@ -20,7 +20,7 @@ from backend.agent import (application_graph, checkpoint, decisions,  # noqa: E4
                            run_graph, store)
 from backend.database import corpus               # noqa: E402
 from backend.worker import Worker                 # noqa: E402
-from tests._fake_gmail import FakeGmailSession    # noqa: E402
+from _fake_gmail import FakeGmailSession    # noqa: E402
 
 pytestmark = pytest.mark.db
 
