@@ -14,9 +14,11 @@ Drafting (Phase 4), run by an "application" task:
 - One LLM call per LLM node (extract_requirements, tailor_resume,
   cover_letter); every other node makes none. The JD requirements are
   extracted once and shared through the graph state by both documents.
-- The validators are the resume engine's, unchanged: a flagged resume
-  project falls back to its original bullets, a flagged letter paragraph is
-  reported. Nothing is regenerated. Any flag sets needs_review.
+- The validators are the resume engine's: a flagged resume project falls
+  back to its original bullets, a flagged letter paragraph is reported.
+  Nothing is regenerated. Any flag sets needs_review. Letters use the
+  cover-letter rules (Phase 6, resume_engine/letter_validator.py); resume
+  bullets the unchanged bullet validator.
 - render writes data/applications/<application_id>/ (resume.docx,
   cover_letter.docx, cover_letter.txt, jd_requirements.json) -- never the
   shared DATA_DIR names the UI and CLIs use.
@@ -161,7 +163,7 @@ def build_application_graph(ctx: Any = None):
 
     def validate_letter(state: AppState) -> dict:
         return {"letter_review": cover_letter.letter_review(
-            state["paragraphs"], state["profile"], state["job"])}
+            state["paragraphs"], state["profile"], state["job"], letter_rules=True)}
 
     def render(state: AppState) -> dict:
         lease()

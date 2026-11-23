@@ -15,6 +15,16 @@ Steps, callable one at a time (the agent graph runs each as its own node):
 
 generate_for_job() chains them (plus extract_jd_requirements) for the UI.
 
+Two rule sets for the truthfulness check (letter_rules=):
+  False  every paragraph goes through the resume-bullet validator
+         (validate_tailored.validate_bullet). The default, and what the UI's
+         generate_for_job() and this CLI use: their outputs are pinned by
+         the golden tests.
+  True   the cover-letter validator (letter_validator.py): sentence-starting
+         words and lower-case hyphenated words aren't flagged on their
+         capital or hyphen alone. The agent (Phase 6) uses it for drafts
+         and for edits.
+
 Run from project root:
     python -m backend.resume_engine.cover_letter --rank 1
     python -m backend.resume_engine.cover_letter --rank 3 --txt-only
@@ -28,6 +38,7 @@ from ..config import DATA_DIR, PROFILE_FILE, RANKED_FILE
 from .resume_tailor import (call_ollama, extract_jd_requirements,
                             DEFAULT_MODEL, OllamaUnavailableError,
                             DocxRenderError, _run_node)
+from .letter_validator import validate_letter_paragraph
 from .validate_tailored import validate_bullet
 
 DOCX_SCRIPT = Path(__file__).resolve().parent / "generate_cover_letter_docx.js"
@@ -89,26 +100,29 @@ Return this exact JSON structure:
     return None
 
 
-def validate_letter(paragraphs, profile):
+def validate_letter(paragraphs, profile, letter_rules=False):
     """Run each paragraph through the hallucination validator.
 
     Company/role names are allowed (the letter must mention them), so they're
     added to the allowed list by the caller. Returns list of per-paragraph
-    results.
+    results. letter_rules=True uses the cover-letter validator
+    (letter_validator.py) instead of the resume-bullet one.
     """
     evidence = _profile_evidence_text(profile)
     skills = [s["skill"] for s in profile.get("skills", [])]
-    return [validate_bullet(p, evidence, skills) for p in paragraphs]
+    check = validate_letter_paragraph if letter_rules else validate_bullet
+    return [check(p, evidence, skills) for p in paragraphs]
 
 
-def letter_review(paragraphs, profile, job):
+def letter_review(paragraphs, profile, job, letter_rules=False):
     """The truthfulness review a reader acts on: [{"paragraph": n,
     "flags": [...]}] for each paragraph with unverified claims. Company and
-    role words are not flags (a letter must name them)."""
+    role words are not flags (a letter must name them). letter_rules: see
+    the module docstring (the agent passes True)."""
     expected = {(job.get("company") or "").lower(), *(
         w.lower() for w in re.findall(r"[A-Za-z]+", job.get("title") or ""))}
     review = []
-    for i, r in enumerate(validate_letter(paragraphs, profile), 1):
+    for i, r in enumerate(validate_letter(paragraphs, profile, letter_rules), 1):
         flags = ([t for t in r["flagged_terms"] if t.lower() not in expected]
                  + r["flagged_numbers"])
         if flags:
