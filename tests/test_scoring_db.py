@@ -11,7 +11,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import text                       # noqa: E402
 
-from backend import version                       # noqa: E402
+from backend import config, version               # noqa: E402
 from backend.database import corpus               # noqa: E402
 from backend.matching_engine.matcher import rank_jobs  # noqa: E402
 from backend.services import scoring              # noqa: E402
@@ -146,6 +146,39 @@ def test_only_the_delta_is_rescored(pg, profile, stub_semantic, monkeypatch):
     monkeypatch.setattr(version, "FORMULA_VERSION", "test-next")
     outcome, scored = _run(profile)
     assert len(scored) == 8 and outcome.formula_version == "test-next"
+    assert outcome.cache_key.startswith("test-next:")
+    _assert_parity(outcome, profile)
+
+
+def test_a_weights_change_rescores_everything_without_a_version_bump(
+        pg, profile, stub_semantic, monkeypatch):
+    corpus.upsert_jobs([_job(i) for i in range(5)])
+    first, scored = _run(profile)
+    assert len(scored) == 5
+
+    unchanged, scored = _run(profile)                 # same code, same settings
+    assert (unchanged.scored, scored) == (0, [])
+    assert unchanged.cache_key == first.cache_key
+
+    monkeypatch.setitem(config.WEIGHTS, "skill_overlap", 0.35)
+    monkeypatch.setitem(config.WEIGHTS, "semantic", 0.35)
+    reweighted, scored = _run(profile)
+    assert len(scored) == reweighted.scored == 5      # full rescore
+    assert reweighted.formula_version == first.formula_version == version.FORMULA_VERSION
+    assert reweighted.cache_key != first.cache_key
+    _assert_parity(reweighted, profile)
+    again, scored = _run(profile)
+    assert (again.scored, scored) == (0, [])
+
+
+def test_a_hard_filter_change_rescores_everything(pg, profile, stub_semantic,
+                                                  monkeypatch):
+    corpus.upsert_jobs([_job(i) for i in range(3)])
+    _run(profile)
+    monkeypatch.setitem(config.HARD_FILTERS, "drop_titles_containing",
+                        [*config.HARD_FILTERS["drop_titles_containing"], "ai"])
+    outcome, scored = _run(profile)
+    assert len(scored) == 3 and outcome.ranked == []    # every job now gated
     _assert_parity(outcome, profile)
 
 
@@ -156,7 +189,7 @@ def test_gate_failures_are_stored_and_never_reevaluated(pg, profile, stub_semant
     with pg.connect() as conn:
         rows = conn.execute(text(
             "SELECT c.title, s.passed, s.match_score, s.score_breakdown, "
-            "s.explanation, s.profile_hash, s.formula_version FROM job_scores s "
+            "s.explanation, s.profile_hash, s.cache_key FROM job_scores s "
             "JOIN canonical_jobs c ON c.id = s.job_id ORDER BY c.title")).all()
     assert [(r.title, r.passed) for r in rows] == [("AI Engineer 0", True),
                                                   ("Sales Engineer", False)]
@@ -164,7 +197,8 @@ def test_gate_failures_are_stored_and_never_reevaluated(pg, profile, stub_semant
     assert (gated.match_score, gated.score_breakdown, gated.explanation) == (
         None, None, None)                                  # SQL NULLs
     assert gated.profile_hash == scoring.profile_hash(profile)
-    assert gated.formula_version == version.FORMULA_VERSION
+    assert gated.cache_key == scoring.cache_key()
+    assert gated.cache_key.startswith(version.FORMULA_VERSION + ":")
     _, scored = _run(profile)
     assert scored == []
 

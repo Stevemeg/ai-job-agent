@@ -26,6 +26,6 @@ on `main` @ `e5cb0df`), and each phase adds tests for what it introduces.
 
 - **Scheduler:** `python -m backend.scheduler` uses APScheduler 3.x with its job store in Postgres, timezone `Asia/Kolkata`, cron `SCAN_CRON` and misfire grace `SCAN_MISFIRE_GRACE_S`. It only enqueues `scan` tasks, keyed on the scheduled fire time. It elects a leader with a Postgres advisory lock, and a leader that loses the lock exits non-zero.
 - **Scan task:** collect from each ATS board in isolation, upsert into `canonical_jobs`, then run an incremental rank. A failing board is reported in the result. Only an all-boards failure fails (and retries) the task.
-- **Incremental ranking:** the new `job_scores` table caches the matcher's output per (job, profile hash, `FORMULA_VERSION`). A rank scores only jobs without a current row and reproduces a full `rank_jobs` exactly (parity tests compare the JSON). Every rank execution holds a session-level advisory lock for the scoring and the file write.
+- **Incremental ranking:** the new `job_scores` table caches the matcher's output per (job, profile hash, cache key), where the cache key is `FORMULA_VERSION` plus a fingerprint of the weights, gates, embedding model and matcher source. A rank scores only jobs without a current row and reproduces a full `rank_jobs` exactly (parity tests compare the JSON). Every rank execution holds a session-level advisory lock for the scoring and the file write.
 - **API:** `POST /v1/scans` and `GET /v1/scans/latest`. `/v1/rankings/status` now reports a stalled task, whose lease expired, as "stalled".
 

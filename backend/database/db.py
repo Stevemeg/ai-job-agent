@@ -229,11 +229,13 @@ JOB_SCORES_LOOKUP_INDEX = "idx_job_scores_profile_formula"
 
 class JobScore(Base):
     """One job's cached matcher output for one profile under one scoring
-    formula (Phase 3 incremental ranking; written by services/scoring.py
+    regime (Phase 3 incremental ranking; written by services/scoring.py
     while the rank lock is held).
 
     A job needs (re)scoring iff there is no row for (job_id, profile_hash,
-    formula_version) whose content_hash is the job's current one. Gate
+    cache_key) whose content_hash is the job's current one. cache_key is
+    scoring.cache_key(), "<FORMULA_VERSION>:<fingerprint[:12]>": it moves
+    whenever the weights, gates, embedding model or matcher code do. Gate
     failures are rows too (passed = false, no score), so they are not
     re-evaluated either. content_hash is scoring.score_input_hash(): it
     covers every job field the matcher reads, including the tags and
@@ -246,13 +248,13 @@ class JobScore(Base):
             "NOT NULL AND explanation IS NOT NULL)",
             name="job_scores_passed_has_score_check"),
         # Every rank execution reads all rows of one (profile, formula).
-        Index(JOB_SCORES_LOOKUP_INDEX, "profile_hash", "formula_version"),
+        Index(JOB_SCORES_LOOKUP_INDEX, "profile_hash", "cache_key"),
     )
 
     job_id = Column(Integer, ForeignKey("canonical_jobs.id", ondelete="CASCADE"),
                     primary_key=True)
     profile_hash = Column(Text, primary_key=True)      # sha256, canonical JSON
-    formula_version = Column(Text, primary_key=True)   # version.FORMULA_VERSION
+    cache_key = Column(Text, primary_key=True)         # scoring.cache_key()
     content_hash = Column(Text, nullable=False)
     passed = Column(Boolean, nullable=False)           # the hard gates
     match_score = Column(Numeric)                      # NULL when gated out
@@ -315,6 +317,13 @@ def _event_type_check_def(conn):
         "AND c.conname = :name"), {"name": EVENT_TYPE_CHECK_NAME}).scalar()
 
 
+def _column_exists(conn, table, column):
+    return bool(conn.execute(text(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = :t "
+        "AND column_name = :c"), {"t": table, "c": column}).scalar())
+
+
 def _run_migrations(conn=None):
     """Idempotent, additive migrations for columns added after the original
     schema.sql shipped. create_all() does NOT alter existing tables, so
@@ -352,6 +361,15 @@ def _run_migrations(conn=None):
     conn.execute(text(
         f"CREATE UNIQUE INDEX IF NOT EXISTS {TASK_CONCURRENCY_INDEX} "
         f"ON tasks (concurrency_key) WHERE {_task_active_predicate()}"))
+    # Phase 3 review: job_scores is keyed on the scoring fingerprint
+    # (scoring.cache_key()), not the bare FORMULA_VERSION. The rename keeps
+    # the primary key and lookup index (they follow the column); the old
+    # rows' keys ("1") never match a fingerprinted key, so they are simply
+    # rescored once.
+    if _column_exists(conn, "job_scores", "formula_version") and \
+            not _column_exists(conn, "job_scores", "cache_key"):
+        conn.execute(text(
+            "ALTER TABLE job_scores RENAME COLUMN formula_version TO cache_key"))
     # v2 agent event types. Postgres can't ALTER a CHECK in place, so a
     # stale constraint is dropped and re-added in this one transaction (no
     # concurrent writer ever sees the table unconstrained; the new set is a

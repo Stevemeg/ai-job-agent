@@ -194,7 +194,7 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     assert db.JOB_SCORES_LOOKUP_INDEX in dict(task_idx_from_sql)
     assert v2_cons_from_orm == v2_cons_from_sql
     assert ("job_scores", "job_scores_pkey",
-            "PRIMARY KEY (job_id, profile_hash, formula_version)") in v2_cons_from_sql
+            "PRIMARY KEY (job_id, profile_hash, cache_key)") in v2_cons_from_sql
 
 
 # The tasks table exactly as Phase 1 shipped it (before the queue columns).
@@ -335,7 +335,7 @@ def test_phase2_database_gains_job_scores_idempotently(pg, monkeypatch):
                   "explanation": '{"strong_matches": []}', **cols}
         with pg.begin() as conn:
             conn.execute(text(
-                "INSERT INTO job_scores (job_id, profile_hash, formula_version, "
+                "INSERT INTO job_scores (job_id, profile_hash, cache_key, "
                 "content_hash, passed, match_score, score_breakdown, explanation) "
                 "VALUES (1, :p, '1', 'c', :passed, :match_score, "
                 "CAST(:score_breakdown AS jsonb), CAST(:explanation AS jsonb))"),
@@ -353,9 +353,55 @@ def test_phase2_database_gains_job_scores_idempotently(pg, monkeypatch):
             "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
             "AND indexname = :n"), {"n": db.JOB_SCORES_LOOKUP_INDEX}).scalar()
         assert conn.execute(text("SELECT count(*) FROM job_scores")).scalar() == 2
-    assert indexdef and "(profile_hash, formula_version)" in indexdef
+    assert indexdef and "(profile_hash, cache_key)" in indexdef
 
     with pg.begin() as conn:                                # FK cascades
         conn.execute(text("DELETE FROM canonical_jobs"))
     with pg.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM job_scores")).scalar() == 0
+
+
+# job_scores exactly as Phase 3 first shipped it: keyed on the bare
+# FORMULA_VERSION.
+PHASE3_JOB_SCORES = """
+CREATE TABLE job_scores (
+    job_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    profile_hash TEXT NOT NULL, formula_version TEXT NOT NULL,
+    content_hash TEXT NOT NULL, passed BOOLEAN NOT NULL, match_score NUMERIC,
+    score_breakdown JSONB, explanation JSONB,
+    scored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_id, profile_hash, formula_version),
+    CONSTRAINT job_scores_passed_has_score_check CHECK (
+        NOT passed OR (match_score IS NOT NULL AND score_breakdown IS NOT NULL
+                       AND explanation IS NOT NULL)));
+CREATE INDEX idx_job_scores_profile_formula
+    ON job_scores (profile_hash, formula_version);
+INSERT INTO canonical_jobs (company, title, normalized_title, content_hash)
+    VALUES ('acme', 'AI Engineer', 'ai engineer', 'h');
+INSERT INTO job_scores (job_id, profile_hash, formula_version, content_hash,
+                        passed) VALUES (1, 'p1', '1', 'c', false);
+"""
+
+
+def test_phase3_job_scores_is_rekeyed_on_cache_key(pg, monkeypatch):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(PHASE2_SCHEMA + PHASE3_JOB_SCORES)
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        cols = set(conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'job_scores'"
+        )).scalars())
+        pkey = conn.execute(text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'job_scores_pkey' "
+            "AND connamespace = current_schema()::regnamespace")).scalar()
+        indexdef = conn.execute(text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = :n"), {"n": db.JOB_SCORES_LOOKUP_INDEX}).scalar()
+        rows = conn.execute(text(
+            "SELECT job_id, profile_hash, cache_key FROM job_scores")).all()
+    assert "cache_key" in cols and "formula_version" not in cols
+    assert pkey == "PRIMARY KEY (job_id, profile_hash, cache_key)"
+    assert "(profile_hash, cache_key)" in indexdef
+    assert rows == [(1, "p1", "1")]          # kept; it just never matches again

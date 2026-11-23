@@ -126,31 +126,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_concurrency_key_active
     ON tasks (concurrency_key) WHERE status IN ('queued', 'running');
 
 -- v2 incremental ranking (Phase 3): one job's cached matcher output for one
--- candidate profile under one scoring formula, written by
+-- candidate profile under one scoring regime, written by
 -- backend/services/scoring.py while the rank lock is held. A job is
--- re-scored only when no row for (job_id, profile_hash, formula_version)
+-- re-scored only when no row for (job_id, profile_hash, cache_key)
 -- carries its current content_hash; gate failures are stored too
 -- (passed = false) so they are not re-evaluated. Existing databases get
--- this table from db.py:init_db() (create_all).
+-- this table from db.py:init_db() (create_all), and a Phase 3 table's
+-- formula_version column is renamed to cache_key by _run_migrations().
 CREATE TABLE IF NOT EXISTS job_scores (
     job_id              INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
     profile_hash        TEXT NOT NULL,                 -- sha256 of the profile's canonical JSON
-    formula_version     TEXT NOT NULL,                 -- backend/version.py FORMULA_VERSION
+    cache_key           TEXT NOT NULL,                 -- scoring.cache_key(): "<FORMULA_VERSION>:<fingerprint[:12]>"
     content_hash        TEXT NOT NULL,                 -- scoring.score_input_hash(): every field the matcher reads
     passed              BOOLEAN NOT NULL,              -- the hard gates
     match_score         NUMERIC,                       -- NULL when gated out
     score_breakdown     JSONB,                         -- {skill_overlap, semantic, role, seniority}
     explanation         JSONB,                         -- {strong_matches, likely_matches, missing_skills}
     scored_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (job_id, profile_hash, formula_version),
+    PRIMARY KEY (job_id, profile_hash, cache_key),
     CONSTRAINT job_scores_passed_has_score_check CHECK (
         NOT passed OR (match_score IS NOT NULL AND score_breakdown IS NOT NULL
                        AND explanation IS NOT NULL))
 );
 
--- Every rank execution reads all rows of one (profile, formula).
+-- Every rank execution reads all rows of one (profile, cache key).
 CREATE INDEX IF NOT EXISTS idx_job_scores_profile_formula
-    ON job_scores (profile_hash, formula_version);
+    ON job_scores (profile_hash, cache_key);
 
 -- Not in this file: APScheduler's job store table (apscheduler_jobs), which
 -- the scheduler (python -m backend.scheduler) creates and owns.
