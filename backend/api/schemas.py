@@ -287,6 +287,36 @@ class DecisionAccepted(BaseModel):
     source: str
 
 
+# ---- agent memory (Phase 6) ---------------------------------------------------
+
+MemoryKind = Literal["company_avoid", "title_avoid", "company_prefer", "title_prefer",
+                     "location_prefer", "note"]
+
+
+class MemoryRecord(BaseModel):
+    id: int
+    kind: str                      # company_avoid | title_avoid | *_prefer | note
+    value: str
+    provenance: str                # stated (you) | learned (from your decisions)
+    evidence: dict[str, Any] = Field(default_factory=dict)  # approvals/events, reasons
+    weight: float                  # *_prefer: triage boost points; *_avoid: times seen
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryCreate(BaseModel):
+    kind: MemoryKind
+    value: str = Field(min_length=1, max_length=2000)
+    weight: Optional[float] = Field(None, ge=0, le=100)   # default 2 (stated)
+
+
+class MemoryUpdate(BaseModel):
+    value: Optional[str] = Field(None, min_length=1, max_length=2000)
+    weight: Optional[float] = Field(None, ge=0, le=100)
+    active: Optional[bool] = None
+
+
 # ---- tracker -----------------------------------------------------------------
 
 class EventCreate(BaseModel):
