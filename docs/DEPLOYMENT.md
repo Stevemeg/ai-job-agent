@@ -115,7 +115,7 @@ Phase 4 adds two task kinds that the same worker runs: `agent_run`, queued by `P
 - **Files.** Drafts are written to `data/applications/<application_id>/` and recorded with their sha256 in `application_artifacts`. In compose, `./data` is bind-mounted into the worker and the API, so the API serves the worker's files.
 - **Checkpoints.** LangGraph's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) are created by the worker on first use, under the same advisory lock as the app's migrations, in the app's database and schema. They are not in `schema.sql`. Each graph step is committed before the next starts (`durability="sync"`). So a retried task resumes at the node its last attempt died in, and nodes it finished are not run again. Nothing prunes old threads yet.
 - **Failure.** An LLM outage or a failing node fails the attempt, which is retried with backoff like any task. After the last attempt the application is marked `failed` with the error. That also happens when a worker dies on the last attempt and its lease expires.
-- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`, `AGENT_LOCATIONS`, `AGENT_ACCEPT_GLOBAL_REMOTE`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`, `AGENT_LOCATIONS`, `AGENT_ACCEPT_GLOBAL_REMOTE`, `AGENT_EXCLUDE_TITLE_WORDS`, `AGENT_MEMORY_MAX_BOOST`, `AGENT_LEARN_*`, `AGENT_FOLLOW_UP_DAYS`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
 
 ## Approval gate and Gmail drafts
 
@@ -127,6 +127,15 @@ Phase 5 adds two more task kinds on the same worker: `application_decision` (que
 - **Gmail secrets.** The OAuth client JSON and the token live under `data/secrets/` (gitignored). In compose, `./data` is bind-mounted into the worker, so set `GMAIL_CREDENTIALS_FILE=/app/data/secrets/gmail_client.json` in `.env` after authorizing on the host (`python -m backend.integrations.gmail_auth`). The token is a credential for your mailbox: protect `data/secrets/` like a password.
 - **Phase 4 data.** Existing `drafted` / `needs_review` applications become `awaiting_approval` (version 1) on first start, with an expiry task each. Their graph threads ended after `persist`; the first decision moves them onto the gate.
 - **API exposure.** Set `API_TOKEN` before the API is reachable by anyone but you: it guards every mutating endpoint (decisions included). Reads stay open and return your documents, so keep port 8000 on localhost or a private network even with a token. The Streamlit UI has no auth at all.
+
+## Memory, follow-ups and sourcing (Phase 6)
+
+- **One more task kind.** `follow_up`, queued when `applied` is logged for a job with an application (in that transaction) and due `AGENT_FOLLOW_UP_DAYS` later, runs on the same worker. Give the API and the UI the same `AGENT_FOLLOW_UP_DAYS` as the worker: the process that logs `applied` schedules it. A dead `follow_up` task marks its pending draft `failed` and puts the error on the application.
+- **Follow-up drafts.** Only with `GMAIL_CREDENTIALS_FILE` and a contact address in the posting; one per application, exactly once (Message-ID `<aja-followup-<id>@ai-job-agent>`, the Phase 5 pattern). Never sent.
+- **Memory.** `agent_memories` is a new table; existing databases get it, `applications.memory_effects`, `applications.follow_up_due` and the `gmail_follow_up` action on first start (idempotent migrations). Learning runs in the decision task and in every agent run's triage; a learning failure is logged and never fails either.
+- **Cover letters.** One validator for every letter (`letter_validator.py`). Its known-name rule reads the job corpus's company names (one query per worker or API process every 10 minutes; the JSON corpus without a database).
+- **Learning-to-rank export.** `python -m backend.ltr.export` writes `data/ltr/outcomes.csv` (gitignored: your decisions and applications). `GET /v1/ltr/export` serves the same CSV, unauthenticated like every read, so keep the API private.
+- **Sources.** `python -m backend.job_scraper.probe_boards` calls the three public job-board APIs (a few requests per name, 0.25 s apart); use it from a machine with normal network access, not from the worker.
 
 ## Single-Host Server Deployment (small-team demo)
 

@@ -51,6 +51,8 @@ services:
       # Bearer token for the mutating endpoints (decisions included). Set it
       # before the API is reachable by anyone but you; reads stay open.
       API_TOKEN: ${API_TOKEN:-}
+      # Logging 'applied' (POST /v1/tracker/events) schedules the follow-up.
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
     ports:
       - "8000:8000"
     volumes:
@@ -100,6 +102,11 @@ services:
       AGENT_ACCEPT_GLOBAL_REMOTE: ${AGENT_ACCEPT_GLOBAL_REMOTE:-false}
       AGENT_APPROVAL_TTL_DAYS: ${AGENT_APPROVAL_TTL_DAYS:-7}
       AGENT_EXCLUDE_TITLE_WORDS: ${AGENT_EXCLUDE_TITLE_WORDS:-}  # empty: senior, sr, staff, ... ("none": off)
+      AGENT_MEMORY_MAX_BOOST: ${AGENT_MEMORY_MAX_BOOST:-5}
+      AGENT_LEARN_COMPANY_DECLINES: ${AGENT_LEARN_COMPANY_DECLINES:-2}
+      AGENT_LEARN_TITLE_DECLINES: ${AGENT_LEARN_TITLE_DECLINES:-3}
+      AGENT_LEARN_PREFER_APPROVALS: ${AGENT_LEARN_PREFER_APPROVALS:-2}
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
       # Gmail drafts (optional): e.g. /app/data/secrets/gmail_client.json,
       # after `python -m backend.integrations.gmail_auth` on the host.
       GMAIL_CREDENTIALS_FILE: ${GMAIL_CREDENTIALS_FILE:-}
@@ -146,6 +153,8 @@ services:
       # Optional: hosted LLM inside containers (local Ollama isn't reachable
       # from Docker). Set in .env; empty means document generation is off.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # The Tracker's 'applied' schedules the follow-up (Phase 6).
+      AGENT_FOLLOW_UP_DAYS: ${AGENT_FOLLOW_UP_DAYS:-7}
     ports:
       - "8501:8501"
     volumes:

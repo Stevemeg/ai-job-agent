@@ -1,6 +1,6 @@
 # API (FastAPI — implemented)
 
-> **Status: implemented** for profile, analysis, rankings, scans, and tracker (`backend/api/`). Document-generation endpoints (tailored resume, cover letter) remain CLI-only for now — they need Ollama and are the next candidates for async endpoints.
+> **Status: implemented** for profile, analysis, rankings, scans, tracker, the agent, its memory and the learning-to-rank export (`backend/api/`). Document-generation endpoints (tailored resume, cover letter) remain CLI-only for now — they need Ollama and are the next candidates for async endpoints.
 
 Run from project root:
 
@@ -35,9 +35,14 @@ Design rules: routers contain no business logic (every endpoint is a thin adapte
 | GET | `/v1/applications/{id}/artifacts/{kind}` | — | Download one drafted file (or the packet) |
 | POST | `/v1/applications/{id}/decision` | `agent.decisions.submit_decision` → worker runs `agent.application_graph.run_decision_task` | Approve / decline / edit the version you reviewed (202). 409 if it isn't awaiting approval at that version or was already decided; 422 for a flagged edit without `acknowledge_flags`; 503 without a database ([details](#approval-gate-phase-5)) |
 | GET | `/v1/tracker` | `database.tracker.get_tracked_jobs` | Tracked applications with derived status |
-| POST | `/v1/tracker/events` | `database.events.log_outcome` | Log save/applied/interview/rejected/offer/dismiss |
+| POST | `/v1/tracker/events` | `database.events.log_outcome` | Log save/applied/interview/rejected/offer/dismiss. Phase 6: `applied` for a job the agent has an application for queues its follow-up; a later outcome clears a due one ([details](#follow-ups)) |
+| GET | `/v1/memories` | `agent.memory.list_memories` | What the agent remembers: every memory with its provenance (`stated` / `learned`) and evidence (`kind`, `active`, `provenance` filters) ([details](#memory)) |
+| POST | `/v1/memories` | `agent.memory.create_stated` | State a memory (201). Stating a learned one makes it yours; one you already stated is 409; a bad kind/value/weight 422 |
+| PATCH | `/v1/memories/{id}` | `agent.memory.update` | Edit `value` / `weight` / `active`. 404 / 409 / 422 |
+| DELETE | `/v1/memories/{id}` | `agent.memory.delete` | Remove a memory (204, 404) |
+| GET | `/v1/ltr/export` | `ltr.export.export_rows` | The learning-to-rank dataset as CSV ([details](#learning-to-rank-export)); 503 without a database |
 
-**Auth.** With `API_TOKEN` set, every mutating endpoint (`POST`/`PUT`) needs `Authorization: Bearer <API_TOKEN>`, else 401. Without it nothing is checked, so **never expose the API beyond localhost or a private network without `API_TOKEN`**. Reads stay unauthenticated even with a token, and they include personal documents (`GET /v1/applications/{id}/artifacts/...`), so keep the API off the public internet either way ([DEPLOYMENT.md](DEPLOYMENT.md#approval-gate-and-gmail-drafts)).
+**Auth.** With `API_TOKEN` set, every mutating endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) needs `Authorization: Bearer <API_TOKEN>`, else 401. Without it nothing is checked, so **never expose the API beyond localhost or a private network without `API_TOKEN`**. Reads stay unauthenticated even with a token, and they include personal documents (`GET /v1/applications/{id}/artifacts/...`), so keep the API off the public internet either way ([DEPLOYMENT.md](DEPLOYMENT.md#approval-gate-and-gmail-drafts)).
 
 ## Rankings on the task queue
 
@@ -118,7 +123,7 @@ The agent drafts a tailored resume and cover letter for the best new jobs. **Not
 **`POST /v1/agent/runs`** queues an `agent_run` task. Its graph, on thread `agent_run:<task_id>`:
 
 1. `refresh_ranking` runs the same incremental rank as `rank` and `scan` tasks, under the rank lock. When nothing changed it scores nothing.
-2. `triage` picks jobs from `job_scores` for the **current** profile and cache key. A job qualifies if it passed the gates, scored at least `AGENT_MIN_SCORE` (20), was seen within `AGENT_MAX_JOB_AGE_DAYS` (14), has no application yet, has no `applied`, `dismiss` or `declined` event, and is in a location `AGENT_LOCATIONS` / `AGENT_ACCEPT_GLOBAL_REMOTE` accept (its own or a posting's; a qualifying posting's `apply_link` becomes the application's), and has a title `AGENT_EXCLUDE_TITLE_WORDS` doesn't exclude (whole words: `senior`, `sr`, `staff`, `lead`, ...). The run's `result.excluded` counts the jobs over the score gate each rule left out. Best first, at most `AGENT_MAX_DRAFTS_PER_RUN` (5). See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+2. `triage` picks jobs from `job_scores` for the **current** profile and cache key. A job qualifies if it passed the gates, scored at least `AGENT_MIN_SCORE` (20), was seen within `AGENT_MAX_JOB_AGE_DAYS` (14), has no application yet, has no `applied`, `dismiss` or `declined` event, and is in a location `AGENT_LOCATIONS` / `AGENT_ACCEPT_GLOBAL_REMOTE` accept (its own or a posting's; a qualifying posting's `apply_link` becomes the application's), and has a title `AGENT_EXCLUDE_TITLE_WORDS` doesn't exclude (whole words: `senior`, `sr`, `staff`, `lead`, ...). Phase 6: it first re-learns your memories from your decisions, then applies the active ones: an `*_avoid` memory leaves matching jobs out, `*_prefer` memories add a bounded boost to the triage **order** of the jobs left (never to `match_score`, never past `AGENT_MIN_SCORE`; [memory](#memory)). The run's `result.excluded` counts every job over the score gate each rule left out (`location`, `title`, `memory`), and `result.memory` says how many memories applied and what learning changed. Best first, at most `AGENT_MAX_DRAFTS_PER_RUN` (5); each dispatched application records the memories that boosted it (`memory_effects`). See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
 3. `dispatch` creates, for each job in **one transaction**, the `applications` row (`queued`) and its `application` task (idempotency key `application:<id>`). Re-running never duplicates one, because of `UNIQUE (user_id, job_id)`.
 
 Each `application` task runs the application graph on thread `application:<id>`:
@@ -184,6 +189,64 @@ GET  /v1/applications/7  -> 200 {..., "status": "ready_to_apply", "packet": {"jo
 ```
 
 The Streamlit **Inbox** tab (database mode only) shows the same queue and calls the same `submit_decision()`.
+
+## Memory
+
+What the agent remembers about your preferences (`backend/agent/memory.py`). **Triage only:** a memory never changes a score, the score gate, `job_scores` or any ranking output.
+
+| `kind` | Effect in triage |
+|---|---|
+| `company_avoid` | jobs at this company are left out (letters and digits compared: `Sarvam AI` = `sarvamai`) |
+| `title_avoid` | jobs whose title contains these word(s) are left out (whole words) |
+| `company_prefer`, `title_prefer`, `location_prefer` | matching jobs get the memory's `weight` (score points) added to their triage ORDER key, capped in total at `AGENT_MEMORY_MAX_BOOST` (5) |
+| `note` | none: a note for you |
+
+**Provenance.** `stated` memories come only from you (`POST /v1/memories`, the Inbox) and learning never changes them. `learned` ones are derived from your own approve/decline decisions, deterministically and without an LLM, every time a decision is applied and before every triage:
+
+- `company_avoid`: a company declined `AGENT_LEARN_COMPANY_DECLINES` (2) times and never approved;
+- `title_avoid`: a title word declined `AGENT_LEARN_TITLE_DECLINES` (3) times and never approved (generic words such as `engineer` and location words are never learned);
+- `*_prefer`: a company, title word or location (the `AGENT_LOCATIONS` entry it matched, never `India`, or `remote`) approved `AGENT_LEARN_PREFER_APPROVALS` (2) times and more often than declined; `weight` = approvals - declines.
+
+Expiries and edits teach nothing. `evidence` lists every decision behind a learned memory (approval, application, job and event ids, title, company, decline reason). A learned memory whose evidence no longer meets its rule is removed. Learning never learns the opposite of a memory you stated and keep active. A **deactivated** memory has no effect and learning never touches it again; editing a learned memory's `value` or `weight` makes it `stated`. A deleted learned memory can be learned again from the same decisions: deactivate it to stop that. A stated memory's default `weight` is 2.
+
+```http
+POST  /v1/memories {"kind": "company_avoid", "value": "Acme"}          -> 201 {"id": 4, "kind": "company_avoid", "value": "Acme", "provenance": "stated", "evidence": {"stated_via": "api"}, "weight": 2.0, "active": true, ...}
+POST  /v1/memories {"kind": "company_avoid", "value": "ACME"}          -> 409 {"detail": "You already have a company_avoid memory for 'Acme' (#4); edit it instead."}
+GET   /v1/memories?provenance=learned                                   -> 200 [{"id": 7, "kind": "title_avoid", "value": "frontend", "provenance": "learned", "weight": 3.0, "evidence": {"rule": "declined 3 times (>= 3), never approved", "declined": [{"approval_id": 12, "application_id": 31, "event_id": 88, "reason": "not my field", ...}], "approved": [], "decline_reasons": ["not my field"]}, ...}]
+PATCH /v1/memories/7 {"active": false}                                  -> 200 {..., "active": false, "provenance": "learned"}
+DELETE /v1/memories/4                                                   -> 204
+```
+
+## Follow-ups
+
+When you log `applied` (`POST /v1/tracker/events`, the Tracker, the CLI) for a job the agent has an application for, a `follow_up` task is queued **in the same transaction**, due `AGENT_FOLLOW_UP_DAYS` (7) later, key `follow_up:<application_id>` (once per application). When it runs:
+
+- if an `interview`, `rejected`, `offer` or `dismiss` was logged for the job after `applied`, it does nothing;
+- otherwise the application's `follow_up_due` becomes `true` (`GET /v1/applications`, the Inbox's **Follow-ups due**), and only if the job description names a contact address **and** Gmail is configured, it creates **one** follow-up Gmail draft (never sent): a fixed template (title, company, your name and contact lines; checked by the cover-letter validator), `In-Reply-To` the approval's draft if there was one. Exactly once: the `gmail_follow_up` action row is committed with the Message-ID `<aja-followup-<application_id>@ai-job-agent>` before Gmail is called, and a retry looks the draft up first (`tests/test_follow_up_kill.py` kills a worker in that window).
+
+Logging a later outcome clears `follow_up_due`.
+
+## Cover-letter truthfulness (Phase 6)
+
+Every cover letter (the UI, the CLI, the agent's drafts and edits, the follow-up template) is checked by `backend/resume_engine/letter_validator.py`; resume bullets keep `validate_tailored.validate_bullet`, unchanged. Same numbers check and lookup as the bullet validator, plus three letter rules: a capitalized word that starts a sentence is not a claim on its capital alone; a hyphenated token is checked part by part (`cutting-edge` is prose, `Spark-based` is checked); and a **known name** that starts a sentence (a company in the job corpus, a skill-taxonomy name, or a short curated list of big companies and tools) is flagged unless your profile has it or it is the target company. Multi-word names are one term (`Hugging Face`). On the labelled fixture (`tests/fixtures/letter_validator/`) that is precision 1.000 and recall 1.000, against 0.273 / 0.818 with the bullet rules.
+
+## Learning-to-rank export
+
+`GET /v1/ltr/export` (and `python -m backend.ltr.export --out data/ltr/outcomes.csv`) returns one CSV row per (user, job) with a decision or an outcome. **Export only:** nothing is trained yet; training starts once there are at least **50** labelled rows (`X-Training-Minimum`; `X-Labelled-Outcomes` is the row count). An empty database returns the header only.
+
+| Column | Meaning |
+|---|---|
+| `user_id`, `job_id`, `application_id` | ids (`application_id` empty for a job the agent never drafted for) |
+| `company`, `title`, `location` | the job (the matched posting's location) |
+| `label` | the furthest stage reached: **0** declined / expired / dismissed, **1** approved, **2** applied (or rejected, which implies applying), **3** interview or offer |
+| `label_name` | the event that set the label |
+| `match_score`, `skill_overlap`, `semantic`, `role`, `seniority` | score features at decision time: the first labelled event's snapshot, else the application's `job_scores` row |
+| `cache_key` | the scoring regime of the application's score |
+| `memory_boost`, `memory_effects` | triage's memory effects (the boost, and the memories as JSON) |
+| `events` | the labelled events in order, e.g. `approved>applied>interview` |
+| `first_event_at`, `label_at`, `last_event_at` | UTC ISO 8601 timestamps |
+
+Impressions, clicks, saves and `drafted` are not decisions: a job with only those has no row. It is a read, so it needs no `API_TOKEN`; it holds your decisions, so keep the API private.
 
 ## Endpoints (planned)
 

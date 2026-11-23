@@ -332,3 +332,64 @@ application, and a manual retry path is Phase 7 work. Old versions' files
 are overwritten by an edit; the `approvals.edits` history records what
 changed.
 
+## Addendum (Phase 6): memory, follow-ups and one letter validator
+
+- **Date:** 2026-11-24
+- **Status:** Accepted (Phase 6)
+
+**Memory is triage-only.** The agent's memories (`agent_memories`,
+`backend/agent/memory.py`) change which jobs the agent drafts for and in
+what order, nothing else. An active `*_avoid` memory leaves matching jobs
+out of triage. Active `*_prefer` memories add their weight, capped at
+`AGENT_MEMORY_MAX_BOOST`, to the triage ORDER key of jobs that already
+passed `AGENT_MIN_SCORE`: a boost can never let a job through the gate,
+the application keeps its real `match_score`, and `job_scores`, ranking
+outputs and scores are never written. The application records which
+memories boosted it (`memory_effects`), so every boost is auditable, and
+the learning-to-rank export carries it as a feature.
+
+**Provenance rules.**
+
+1. `stated` memories come only from the user (API, Inbox). Learning never
+   updates, deactivates or deletes one, and never learns the opposite of
+   an active one.
+2. `learned` memories are a deterministic function of the user's own
+   approve/decline decisions (no LLM, thresholds in `AGENT_LEARN_*`).
+   Expiries and edits teach nothing. Each one carries its evidence: the
+   approval, application, job and event ids and the decline reasons.
+   Learning recomputes them all, one learner per user (an advisory lock),
+   so it is idempotent and a memory whose evidence no longer meets its
+   rule disappears.
+3. The user's hand wins: a deactivated memory is frozen (no effect, never
+   re-learned), and editing a learned memory's value or weight makes it
+   `stated`.
+
+Learning runs after each applied decision and at the start of every
+triage. A learning failure is logged and never fails the decision or the
+run.
+
+**Follow-ups reuse the Phase 5 patterns.** An `applied` event enqueues a
+`follow_up` task in the same transaction (§2), keyed per application. The
+task sets `follow_up_due` unless a later outcome exists, and creates at
+most one follow-up Gmail draft with the exactly-once Message-ID pattern
+(the action row committed before Gmail is called; a retry searches
+first). The draft is a fixed template that still goes through the letter
+validator (guardrail 5); nothing is sent.
+
+**One letter validator.** Cover letters are prose, so they get their own
+truthfulness rules (`resume_engine/letter_validator.py`), used by every
+letter path: the UI, the CLI, drafts, edits and follow-ups. Resume bullets
+keep the v1 bullet validator unchanged. The letter rules know names that
+start a sentence from the job corpus, the skill taxonomy and a curated
+list. A name in none of them that starts a sentence is the documented
+residual miss.
+
+**Learning to rank: export only.** Phase 6 exports the labelled dataset
+(`backend/ltr/export.py`); no model is trained and nothing feeds back
+into scoring until at least 50 labelled outcomes exist and a later phase
+decides how a learned ranker would be evaluated against the current
+formula.
+
+Consequences: a third durable thing to operate (`agent_memories`), and a
+second exactly-once Gmail action. Nothing prunes old follow-up tasks or
+learned-memory evidence yet (Phase 7).

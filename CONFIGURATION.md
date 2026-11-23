@@ -55,6 +55,11 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `AGENT_ACCEPT_GLOBAL_REMOTE` | env / `.env` (worker) | `false` | Triage: `true` also accepts remote jobs that don't mention India (plain "Remote", "Remote - USA"). Remote jobs that mention India are always accepted |
 | `AGENT_EXCLUDE_TITLE_WORDS` | env / `.env` (worker) | `senior,sr,staff,principal,lead,manager,director,head,architect,vp,distinguished` | Triage: comma-separated. A job whose **title** contains one of these as a whole word (case-insensitive) is not drafted for. `none` turns the filter off. Scoring is unchanged |
 | `AGENT_APPROVAL_TTL_DAYS` | env / `.env` (worker) | `7` | An application nobody approves, edits or declines within this many days of its latest draft expires |
+| `AGENT_MEMORY_MAX_BOOST` | env / `.env` (worker) | `5` | Triage: the most a job's matching `*_prefer` memories can add to its triage **order** key, in score points. Never added to its score, never past `AGENT_MIN_SCORE`. `0` turns the boost off |
+| `AGENT_LEARN_COMPANY_DECLINES` | env / `.env` (worker) | `2` | Memory: a company you declined this often (and never approved) is learned as `company_avoid` |
+| `AGENT_LEARN_TITLE_DECLINES` | env / `.env` (worker) | `3` | Memory: a title word you declined this often (and never approved) is learned as `title_avoid` |
+| `AGENT_LEARN_PREFER_APPROVALS` | env / `.env` (worker) | `2` | Memory: a company, title word or location you approved this often (more often than declined) is learned as `*_prefer` |
+| `AGENT_FOLLOW_UP_DAYS` | env / `.env` (worker and API) | `7` | A follow-up is due this many days after you log `applied`, unless a reply is logged first. Read when `applied` is logged, so the API (or the Tracker UI) process needs it too |
 | `GMAIL_CREDENTIALS_FILE` | env / `.env` (worker) | — | Path of a Google OAuth **Desktop app** client JSON. Gmail drafts are on only when this is set |
 | `GMAIL_TOKEN_FILE` | env / `.env` (worker) | `data/secrets/gmail_token.json` | Where the OAuth token is written and read (gitignored) |
 | `API_TOKEN` | env / `.env` (API) | — | When set, every mutating API endpoint needs `Authorization: Bearer <API_TOKEN>` (401 otherwise). Unset: no check, so never expose the API beyond localhost without it |
@@ -76,6 +81,8 @@ Triage takes jobs that were scored for the **current** profile under the **curre
 Seniority filter (triage only): a title is skipped when it contains one of `AGENT_EXCLUDE_TITLE_WORDS` as a whole word, case-insensitively. Punctuation and hyphens split words, so `"Senior Staff Software Engineer"`, `"Sr. ML Engineer"` and `"Tech-Lead"` are skipped, while `"Leading-edge AI Engineer"` (`leading` is not `lead`), `"Headless CMS Developer"` and `"AI Engineer"` are kept. The job's score and rank don't change; the agent just doesn't draft for it.
 
 Location rules (triage only; scoring and ranking never look at them): a location qualifies when it contains one of `AGENT_LOCATIONS` as whole words (`"Bengaluru, India"` contains `bengaluru`; `"Indianapolis"` doesn't contain `india`). A remote location (`remote`, `anywhere`, `worldwide`, `wfh`) qualifies only if it mentions India, or with `AGENT_ACCEPT_GLOBAL_REMOTE=true`. A job qualifies if its own location or any of its postings' does. When a posting qualifies, the application uses that posting's location and `apply_link`.
+
+Phase 6: triage also applies the agent's memories (below): `*_avoid` memories leave jobs out and `*_prefer` memories reorder the rest, without changing any score.
 
 Drafts go to `data/applications/<application_id>/`. See [DEPLOYMENT.md](docs/DEPLOYMENT.md#agent-dry-run) and [API.md](docs/API.md#agent-phase-4-dry-run).
 
@@ -104,6 +111,27 @@ Every drafted application waits for you (`awaiting_approval`) in the Streamlit *
 3. Give the worker the same `GMAIL_CREDENTIALS_FILE` (and `GMAIL_TOKEN_FILE` if you moved it). The token refreshes itself.
 
 Without `GMAIL_CREDENTIALS_FILE`, approval stops at the packet (`ready_to_apply`).
+
+## Memory and follow-ups (Phase 6)
+
+The agent keeps **memories** of your preferences ([API.md](docs/API.md#memory)): ones you state (`/v1/memories`, the Inbox's Memory section) and ones it learns from your approvals and declines with the `AGENT_LEARN_*` thresholds above. They only steer triage: avoid memories keep matching jobs out, prefer memories move matching jobs up the order by at most `AGENT_MEMORY_MAX_BOOST`. Every learned memory shows its evidence (the decisions and your decline reasons). Deactivate one to stop it, and to stop it from being learned again.
+
+**Follow-ups** ([API.md](docs/API.md#follow-ups)): `AGENT_FOLLOW_UP_DAYS` after you log `applied` with no reply logged, the application shows under **Follow-ups due** in the Inbox, and with Gmail configured and a contact address in the posting one follow-up **draft** is created. Nothing is sent.
+
+**The learning-to-rank export:** `python -m backend.ltr.export --out data/ltr/outcomes.csv` (gitignored) or `GET /v1/ltr/export`. It is a dataset only; training waits for 50 labelled outcomes.
+
+## Job sources
+
+The collector reads only the public Greenhouse, Lever and Ashby job-board APIs (ADR-001 guardrail 3), for the slugs listed in `backend/job_scraper/ats_collector.py`: `GREENHOUSE_COMPANIES`, `LEVER_COMPANIES`, `ASHBY_COMPANIES`. To add a company, probe it first:
+
+```bash
+python -m backend.job_scraper.probe_boards Razorpay "Sarvam AI" "Observe.AI"
+python -m backend.job_scraper.probe_boards "Fi=epifi,fimoney" --json probe.json   # exact slugs
+```
+
+For each name it tries a few slug spellings (joined, hyphenated, first word, each with `india` / `hq`) on all three APIs, and **keeps a board only if it answers 200 and has at least one posting `AGENT_LOCATIONS` accepts**. Everything else is listed as dropped, with the reason (no board under any slug, a board with no eligible posting, a network error). It prints the lines to add; nothing is written. A short slug can be someone else's board, so check the board name and sample posting it shows.
+
+Phase 6 added seven India boards this way (verified 2026-11-23, India-eligible / total postings): Greenhouse `groww` (7/7), `observeai` (5/10), `inmobi` (39/71); Lever `cred` (11/12), `meesho` (47/48), the first Lever boards; Ashby `atlan` (3/7), `sarvam` (40/40). Of the other 33 candidates probed, Freshworks, Navi, Slice and Fi have boards with no India posting, and the rest have no public board under any slug tried.
 
 ## Job corpus source
 
