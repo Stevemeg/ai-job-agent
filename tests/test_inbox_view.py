@@ -71,6 +71,8 @@ def stubbed(monkeypatch):
         calls.append((application_id, kwargs))
         return {"approval_id": 1}
     monkeypatch.setattr(decisions, "submit_decision", submit)
+    from backend.ui.views import inbox
+    monkeypatch.setattr(inbox, "_load_memories", lambda profile: (1, []))   # Phase 6
     return calls
 
 
@@ -143,3 +145,94 @@ def test_without_a_database_the_inbox_explains(monkeypatch):
     monkeypatch.setattr(store, "list_applications", down)
     at = _run()
     assert "isn't reachable" in _markdown(at)
+
+
+# ---- Memory (Phase 6) ----------------------------------------------------------------
+
+MEMORIES = [
+    {"id": 7, "kind": "company_avoid", "value": "acme", "provenance": "learned",
+     "weight": 2.0, "active": True, "evidence": {
+         "rule": "declined 2 times (>= 2), never approved",
+         "declined": [{"decision": "decline", "approval_id": 3, "application_id": 11,
+                       "event_id": 21, "title": "AI Engineer", "company": "acme",
+                       "reason": "too far"},
+                      {"decision": "decline", "approval_id": 4, "application_id": 12,
+                       "event_id": None, "title": "ML Engineer", "company": "acme",
+                       "reason": None}],
+         "approved": []}},
+    {"id": 8, "kind": "title_prefer", "value": "machine learning", "provenance": "stated",
+     "weight": 3.0, "active": False, "evidence": {"stated_via": "api"}},
+]
+
+
+def test_memory_label_and_evidence_lines():
+    pytest.importorskip("streamlit")
+    from backend.ui.views import inbox
+    assert inbox.memory_label(MEMORIES[0]) == "Avoid company: acme · learned · weight 2"
+    assert inbox.memory_label(MEMORIES[1]) == (
+        "Prefer title word: machine learning · stated by you · weight 3 · inactive")
+    assert inbox.evidence_lines(MEMORIES[0]) == [
+        "Learned: declined 2 times (>= 2), never approved.",
+        'Declined application #11: AI Engineer at acme (approval #3, event #21) -- "too far"',
+        "Declined application #12: ML Engineer at acme (approval #4)"]
+    assert inbox.evidence_lines(MEMORIES[1]) == ["You stated this (via api)."]
+    note = {"id": 9, "kind": "note", "value": "x", "provenance": "stated", "weight": 2.0,
+            "active": True, "evidence": {}}
+    assert inbox.memory_label(note) == "Note: x · stated by you"
+
+
+@pytest.fixture
+def memories(stubbed, monkeypatch):
+    from backend.agent import memory
+    from backend.ui.views import inbox
+    calls = []
+    monkeypatch.setattr(inbox, "_load_memories", lambda profile: (5, list(MEMORIES)))
+    monkeypatch.setattr(memory, "update", lambda **kw: calls.append(("update", kw)))
+    monkeypatch.setattr(memory, "delete", lambda **kw: calls.append(("delete", kw)))
+    monkeypatch.setattr(memory, "create_stated",
+                        lambda **kw: calls.append(("create_stated", kw)))
+    return calls
+
+
+def test_the_memory_section_lists_provenance_and_evidence(memories):
+    text = _markdown(_run())
+    assert "#### Memory" in text
+    assert "Avoid company: acme · learned · weight 2" in text
+    assert "uja-pill amber" in text and "uja-pill green" in text
+    assert "too far" in text and "approval #3, event #21" in text
+
+
+def test_deactivate_activate_and_delete(memories):
+    at = _run()
+    at.button(key="mem-7-toggle").click().run(timeout=30)
+    assert memories[-1] == ("update", {"user_id": 5, "memory_id": 7, "active": False})
+    at.button(key="mem-8-toggle").click().run(timeout=30)
+    assert memories[-1] == ("update", {"user_id": 5, "memory_id": 8, "active": True})
+    at.button(key="mem-7-delete").click().run(timeout=30)
+    assert memories[-1] == ("delete", {"user_id": 5, "memory_id": 7})
+
+
+def test_edit_and_add(memories):
+    at = _run()
+    at.text_input(key="mem-7-value").input("Acme Corp")
+    at.number_input(key="mem-7-weight").set_value(4.0)
+    at.button(key="FormSubmitter:mem-7-form-Save").click().run(timeout=30)
+    assert memories[-1] == ("update", {"user_id": 5, "memory_id": 7, "value": "Acme Corp",
+                                       "weight": 4.0})
+    at.selectbox(key="mem-add-kind").set_value("location_prefer")
+    at.text_input(key="mem-add-value").input("Pune")
+    at.button(key="FormSubmitter:mem-add-Remember").click().run(timeout=30)
+    assert memories[-1] == ("create_stated", {"user_id": 5, "kind": "location_prefer",
+                                              "value": "Pune", "via": "ui"})
+
+
+def test_a_memory_error_is_shown_not_raised(memories, monkeypatch):
+    from backend.agent import memory
+
+    def clash(**kw):
+        raise memory.MemoryConflict("You already have a company_avoid memory for 'acme'.")
+    monkeypatch.setattr(memory, "create_stated", clash)
+    at = _run()
+    at.text_input(key="mem-add-value").input("acme")
+    at.button(key="FormSubmitter:mem-add-Remember").click().run(timeout=30)
+    assert any("already have" in w.value for w in at.warning)

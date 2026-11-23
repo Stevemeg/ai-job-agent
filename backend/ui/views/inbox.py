@@ -14,6 +14,12 @@ recorded with the version shown here (a stale page gets a conflict, not a
 wrong decision) and the worker applies it. Approving prepares the packet
 and at most a Gmail DRAFT; nothing is ever sent or submitted -- you apply
 yourself, from the apply link.
+
+Memory (Phase 6): what the agent remembers about your preferences, stated
+by you or learned from your decisions, with the evidence behind each one.
+Edit, deactivate or delete them here (backend.agent.memory, the same
+functions as /v1/memories), or state a new one. Memories only steer
+triage: they never change a score.
 """
 from __future__ import annotations
 
@@ -26,6 +32,9 @@ from .. import theme
 
 DOWNLOADS = (("resume_docx", "Resume (.docx)"), ("cover_letter_docx", "Cover letter (.docx)"))
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MEMORY_LABELS = {"company_avoid": "Avoid company", "title_avoid": "Avoid title word",
+                 "company_prefer": "Prefer company", "title_prefer": "Prefer title word",
+                 "location_prefer": "Prefer location", "note": "Note"}
 
 
 # ---- what a card shows (no Streamlit) -------------------------------------------
@@ -68,6 +77,40 @@ def edits_from_form(documents: dict, paragraphs: list[str],
     if changed:
         edits["resume_bullets"] = changed
     return edits
+
+
+def memory_label(m: dict) -> str:
+    """One line for a memory: what it is, its value, where it came from."""
+    parts = [f"{MEMORY_LABELS.get(m['kind'], m['kind'])}: {m['value']}",
+             "stated by you" if m["provenance"] == "stated" else "learned"]
+    if m["kind"] != "note":
+        parts.append(f"weight {m['weight']:g}")
+    if not m.get("active", True):
+        parts.append("inactive")
+    return " · ".join(parts)
+
+
+def evidence_lines(m: dict) -> list[str]:
+    """What a memory rests on: the rule and each decision behind it (ids
+    and decline reasons), or that you stated it."""
+    ev = m.get("evidence") or {}
+    lines = []
+    if m["provenance"] == "stated":
+        lines.append(f"You stated this (via {ev.get('stated_via', 'the API')}).")
+    if ev.get("rule"):
+        lines.append(("Learned first: " if m["provenance"] == "stated" else "Learned: ")
+                     + ev["rule"] + ".")
+    for item in (ev.get("declined") or []) + (ev.get("approved") or []):
+        verb = "Declined" if item.get("decision") == "decline" else "Approved"
+        ids = f"approval #{item.get('approval_id')}"
+        if item.get("event_id") is not None:
+            ids += f", event #{item['event_id']}"
+        line = (f"{verb} application #{item.get('application_id')}: {item.get('title')} "
+                f"at {item.get('company')} ({ids})")
+        if item.get("reason"):
+            line += f' -- "{item["reason"]}"'
+        lines.append(line)
+    return lines
 
 
 # ---- Streamlit ------------------------------------------------------------------------
@@ -202,6 +245,87 @@ def _card(app: dict) -> None:
                         _submit(app, "edit", edits=edits, acknowledge_flags=keep)
 
 
+def _load_memories(profile: dict) -> tuple[int, list[dict]]:
+    from backend.agent import memory, store
+    user_id = store.user_for_profile(profile)
+    return user_id, memory.list_memories(user_id)
+
+
+def _memory_action(fn, notice: str, **kwargs) -> None:
+    from backend.agent import memory
+    try:
+        fn(**kwargs)
+    except memory.MemoryRequestError as exc:
+        st.warning(str(exc))
+        return
+    st.session_state["inbox_notice"] = notice
+    st.rerun()
+
+
+def _memory_row(user_id: int, m: dict) -> None:
+    from backend.agent import memory
+    pill = "green" if m["provenance"] == "stated" else "amber"
+    off = "" if m.get("active", True) else ' <span class="uja-pill">inactive</span>'
+    st.markdown(f'<span class="uja-pill {pill}">{escape(m["provenance"])}</span> '
+                f'{escape(memory_label(m))}{off}', unsafe_allow_html=True)
+    key = f"mem-{m['id']}"
+    with st.expander("Evidence and edit", expanded=False):
+        for line in evidence_lines(m):
+            st.markdown(f"- {escape(line)}", unsafe_allow_html=True)
+        with st.form(f"{key}-form"):
+            value = st.text_input("Value", value=m["value"], key=f"{key}-value")
+            weight = (None if m["kind"] == "note" else
+                      st.number_input("Weight (prefer: boost points)", min_value=0.0,
+                                      max_value=100.0, value=float(m["weight"]),
+                                      step=0.5, key=f"{key}-weight"))
+            if st.form_submit_button("Save"):
+                _memory_action(memory.update, f"Memory #{m['id']} saved.",
+                               user_id=user_id, memory_id=m["id"], value=value,
+                               weight=weight)
+        a_col, d_col = st.columns(2)
+        with a_col:
+            label = "Deactivate" if m.get("active", True) else "Activate"
+            if st.button(label, key=f"{key}-toggle"):
+                _memory_action(memory.update, f"Memory #{m['id']} {label.lower()}d.",
+                               user_id=user_id, memory_id=m["id"],
+                               active=not m.get("active", True))
+        with d_col:
+            if st.button("Delete", key=f"{key}-delete"):
+                _memory_action(memory.delete, f"Memory #{m['id']} deleted.",
+                               user_id=user_id, memory_id=m["id"])
+
+
+def _memory_section(profile: dict) -> None:
+    from backend.agent import memory
+    st.markdown("---")
+    st.markdown("#### Memory")
+    st.markdown('<p class="uja-muted">What the agent remembers about your preferences. '
+                'An avoid memory keeps matching jobs out of triage; a prefer memory '
+                'moves matching jobs up the order. Neither ever changes a score or lets '
+                'a job past AGENT_MIN_SCORE. Learned memories come from your approvals '
+                'and declines; deactivate one to stop it being learned again.</p>',
+                unsafe_allow_html=True)
+    try:
+        user_id, memories = _load_memories(profile)
+    except Exception as exc:                                # noqa: BLE001
+        st.caption(f"Memory is unavailable ({exc.__class__.__name__}).")
+        return
+    if not memories:
+        st.markdown('<p class="uja-muted">Nothing remembered yet.</p>',
+                    unsafe_allow_html=True)
+    for m in memories:
+        _memory_row(user_id, m)
+    with st.form("mem-add"):
+        st.markdown("**Tell the agent something**")
+        kind = st.selectbox("Kind", list(MEMORY_LABELS), format_func=MEMORY_LABELS.get,
+                            key="mem-add-kind")
+        value = st.text_input("Value", key="mem-add-value",
+                              placeholder="e.g. a company, a title word, a city")
+        if st.form_submit_button("Remember"):
+            _memory_action(memory.create_stated, "Remembered.", user_id=user_id,
+                           kind=kind, value=value, via="ui")
+
+
 def render(profile: dict) -> None:
     try:
         from backend.agent import store
@@ -224,6 +348,6 @@ def render(profile: dict) -> None:
         st.markdown('<p class="uja-muted">Nothing to review. The agent drafts for new '
                     'matches after each scan (AGENT_ENABLED=true) or on '
                     'POST /v1/agent/runs.</p>', unsafe_allow_html=True)
-        return
     for app in apps:
         _card(app)
+    _memory_section(profile)
