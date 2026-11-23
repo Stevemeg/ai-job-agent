@@ -63,11 +63,13 @@ jobs:
         # requirements.txt (torch etc.) is not needed to validate the domain
         # logic: the ranking tests run the real matcher with the embedding
         # similarity stubbed. The agent tests need LangGraph and its
-        # checkpointer, at the versions requirements.txt pins.
+        # checkpointer, at the versions requirements.txt pins (its
+        # agent-pins block, transitive dependencies included).
         run: |
           pip install sqlalchemy psycopg2-binary fastapi httpx python-multipart requests beautifulsoup4 "apscheduler>=3.10,<4"
-          grep -E '^(langgraph|psycopg)' requirements.txt > /tmp/agent-requirements.txt
+          sed -n '/^# agent-pins:begin/,/^# agent-pins:end/p' requirements.txt > /tmp/agent-requirements.txt
           pip install -r /tmp/agent-requirements.txt
+          pip check
 
       - name: Install the docx generators' Node deps
         # The .docx rendering tests run the real generators.
