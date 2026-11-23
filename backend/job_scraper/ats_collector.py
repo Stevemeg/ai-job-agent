@@ -47,7 +47,9 @@ from ..config import JOBS_FILE
 # <company>, or https://jobs.ashbyhq.com/<name> to discover a company's token.
 # --------------------------------------------------------------------------
 GREENHOUSE_COMPANIES = [
-    "stripe", "airbnb", "robinhood", "doordash", "coinbase", "asana",
+    # DoorDash's board token is "doordashusa" (board name "DoorDash USA");
+    # "doordash" returns 404 (checked 2026-11-23 against boards-api).
+    "stripe", "airbnb", "robinhood", "doordashusa", "coinbase", "asana",
     "discord", "pinterest", "lyft", "instacart", "affirm", "gitlab",
     "databricks", "scaleai", "anthropic",
 ]
@@ -64,8 +66,10 @@ LEVER_COMPANIES = [
 ]
 
 ASHBY_COMPANIES = [
+    # Perplexity's job board name is "perplexity"; "perplexity-ai" returns
+    # 404 (checked 2026-11-23 against the posting API).
     "ramp", "openai", "linear", "watershed", "mercury", "vanta",
-    "modal", "replit", "perplexity-ai", "deel",
+    "modal", "replit", "perplexity", "deel",
 ]
 
 REQUEST_TIMEOUT = 10
