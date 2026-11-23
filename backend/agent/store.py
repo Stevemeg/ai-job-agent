@@ -11,6 +11,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from ..database.db import APPLICATION_DONE_STATUSES, get_engine, init_db
+from .locations import LocationPolicy, job_eligibility
 
 APPLICATION_KIND = "application"
 APPLICATION_MAX_ATTEMPTS = 3
@@ -40,7 +41,8 @@ def user_for_profile(profile: dict) -> int:
 # triage
 # --------------------------------------------------------------------------
 _TRIAGE = text("""
-    SELECT s.job_id, s.match_score, j.title, j.company, j.last_seen_at
+    SELECT s.job_id, s.match_score, j.title, j.company, j.location, j.postings,
+           j.apply_link
     FROM job_scores s
     JOIN canonical_jobs j ON j.id = s.job_id
     WHERE s.profile_hash = :profile_hash
@@ -55,27 +57,46 @@ _TRIAGE = text("""
                       WHERE e.user_id = :user_id AND e.job_id = s.job_id
                         AND e.event_type IN :excluding)
     ORDER BY s.match_score DESC, s.job_id
-    LIMIT :cap
 """).bindparams(bindparam("excluding", expanding=True))
 
 
 def triage(*, user_id: int, profile_hash: str, cache_key: str,
-           min_score: float, max_age_days: int, cap: int) -> list[dict]:
+           min_score: float, max_age_days: int, cap: int,
+           policy: LocationPolicy | None = None) -> list[dict]:
     """The jobs to draft for, best first: scored for THIS profile under
     THIS cache key, passed the gates, score >= min_score, seen within
-    max_age_days, no application yet, and no applied/dismiss/declined
-    event. Ties keep job id order. At most `cap`."""
+    max_age_days, no application yet, no applied/dismiss/declined event,
+    and in a location the policy accepts (locations.py; default: the
+    AGENT_LOCATIONS defaults, no global remote). Ties keep job id order.
+    At most `cap`.
+
+    Each candidate carries the posting its application will use
+    (`posting`, None for the job's own location) and the resulting
+    `location` and `apply_link`."""
     if cap <= 0:
         return []
+    policy = policy or LocationPolicy()
     init_db()
     with get_engine().connect() as conn:
         rows = conn.execute(_TRIAGE, {
             "profile_hash": profile_hash, "cache_key": cache_key,
             "min_score": min_score, "max_age_days": max_age_days,
-            "user_id": user_id, "excluding": list(EXCLUDING_EVENTS),
-            "cap": cap}).mappings().all()
-    return [{"job_id": r["job_id"], "match_score": float(r["match_score"]),
-             "title": r["title"], "company": r["company"]} for r in rows]
+            "user_id": user_id, "excluding": list(EXCLUDING_EVENTS)}).mappings()
+        picked = []
+        for r in rows:
+            fit = job_eligibility(r["location"], r["postings"], policy)
+            if not fit.eligible:
+                continue
+            posting = fit.posting or {}
+            picked.append({
+                "job_id": r["job_id"], "match_score": float(r["match_score"]),
+                "title": r["title"], "company": r["company"],
+                "location": posting.get("location") or r["location"],
+                "apply_link": posting.get("apply_link") or r["apply_link"],
+                "location_match": fit.match, "posting": fit.posting})
+            if len(picked) >= cap:
+                break
+    return picked
 
 
 # --------------------------------------------------------------------------
@@ -83,26 +104,30 @@ def triage(*, user_id: int, profile_hash: str, cache_key: str,
 # --------------------------------------------------------------------------
 _INSERT_APPLICATION = text("""
     INSERT INTO applications (id, user_id, job_id, profile_hash, cache_key,
-                              match_score, status, thread_id)
+                              match_score, status, thread_id, posting)
     SELECT n, :user_id, :job_id, :profile_hash, :cache_key, :match_score,
-           'queued', 'application:' || n
+           'queued', 'application:' || n, :posting
     FROM (SELECT nextval(pg_get_serial_sequence('applications', 'id')) AS n) AS seq
     ON CONFLICT (user_id, job_id) DO NOTHING
     RETURNING id
-""")
+""").bindparams(bindparam("posting", type_=JSONB(none_as_null=True)))
 
 
 def dispatch(*, user_id: int, job_id: int, match_score: float,
-             profile_hash: str, cache_key: str) -> dict | None:
+             profile_hash: str, cache_key: str,
+             posting: dict | None = None) -> dict | None:
     """Create the application and enqueue its "application" task (key
     "application:<id>") in ONE transaction: both commit or neither does.
-    None if (user, job) already has an application."""
+    `posting`: the posting triage matched (its location and apply_link
+    become the application's), None for the job's own. None if (user,
+    job) already has an application."""
     from .. import taskqueue
     init_db()
     with get_engine().begin() as conn:
         application_id = conn.execute(_INSERT_APPLICATION, {
             "user_id": user_id, "job_id": job_id, "match_score": match_score,
-            "profile_hash": profile_hash, "cache_key": cache_key}).scalar()
+            "profile_hash": profile_hash, "cache_key": cache_key,
+            "posting": posting}).scalar()
         if application_id is None:
             return None
         task_id = taskqueue.enqueue(
@@ -118,7 +143,9 @@ def dispatch(*, user_id: int, job_id: int, match_score: float,
 # --------------------------------------------------------------------------
 _LOAD = text("""
     SELECT a.id, a.user_id, a.job_id, a.status, a.match_score, a.profile_hash,
-           a.cache_key, j.title, j.company, j.location, j.apply_link,
+           a.cache_key, j.title, j.company,
+           COALESCE(a.posting->>'location', j.location) AS location,
+           COALESCE(a.posting->>'apply_link', j.apply_link) AS apply_link,
            j.clean_description, j.tags, j.seniority
     FROM applications a JOIN canonical_jobs j ON j.id = a.job_id
     WHERE a.id = :id
@@ -226,7 +253,9 @@ def persist(application_id: int, artifacts: dict[str, dict], status: str) -> boo
 _LIST = """
     SELECT a.id, a.user_id, a.job_id, a.status, a.match_score, a.profile_hash,
            a.cache_key, a.thread_id, a.error, a.created_at, a.updated_at,
-           j.title, j.company, j.location, j.apply_link
+           j.title, j.company,
+           COALESCE(a.posting->>'location', j.location) AS location,
+           COALESCE(a.posting->>'apply_link', j.apply_link) AS apply_link
     FROM applications a JOIN canonical_jobs j ON j.id = a.job_id
 """
 

@@ -20,7 +20,7 @@ pytestmark = pytest.mark.db
 
 @pytest.fixture
 def boards(agent_env, monkeypatch):
-    jobs = [{"title": f"AI Engineer {i}", "company": "acme", "location": "Remote",
+    jobs = [{"title": f"AI Engineer {i}", "company": "acme", "location": "Bengaluru, India",
              "tags": [], "experience": "1 years", "seniority": "Junior",
              "clean_description": "RAG with FAISS and LLMs.",
              "apply_link": f"https://acme/{i}", "source": "ats",

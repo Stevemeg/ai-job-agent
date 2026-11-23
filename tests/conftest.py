@@ -221,7 +221,8 @@ def agent_db(pg, monkeypatch):
 
 
 AGENT_ENV_VARS = ("AGENT_ENABLED", "AGENT_MIN_SCORE", "AGENT_MAX_JOB_AGE_DAYS",
-                  "AGENT_MAX_DRAFTS_PER_RUN")
+                  "AGENT_MAX_DRAFTS_PER_RUN", "AGENT_LOCATIONS",
+                  "AGENT_ACCEPT_GLOBAL_REMOTE")
 
 
 @pytest.fixture

@@ -150,6 +150,7 @@ class DispatchedApplication(BaseModel):
     match_score: float
     title: Optional[str] = None
     company: Optional[str] = None
+    location: Optional[str] = None          # the qualifying posting's, else the job's
 
 
 class AgentRunResult(BaseModel):

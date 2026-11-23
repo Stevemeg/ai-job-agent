@@ -91,6 +91,8 @@ services:
       AGENT_MIN_SCORE: ${AGENT_MIN_SCORE:-80}
       AGENT_MAX_JOB_AGE_DAYS: ${AGENT_MAX_JOB_AGE_DAYS:-14}
       AGENT_MAX_DRAFTS_PER_RUN: ${AGENT_MAX_DRAFTS_PER_RUN:-5}
+      AGENT_LOCATIONS: ${AGENT_LOCATIONS:-}                # empty: the built-in Indian city list
+      AGENT_ACCEPT_GLOBAL_REMOTE: ${AGENT_ACCEPT_GLOBAL_REMOTE:-false}
     volumes:
       - ./data:/app/data          # profile in; ranked_jobs.json and applications/ out
       - models:/models            # embedding model cache, shared with api/ui

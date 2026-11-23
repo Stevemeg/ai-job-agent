@@ -173,6 +173,11 @@ CREATE TABLE IF NOT EXISTS applications (
                                           'needs_review', 'failed')),
     thread_id       TEXT NOT NULL UNIQUE,              -- "application:<id>"
     error           TEXT,                              -- why it failed
+    -- The job posting triage matched on location ({source, posting_id,
+    -- location, apply_link}); its location and apply_link are the
+    -- application's. NULL: the job's own location matched. (Phase 5;
+    -- Phase 4 databases get it via db.py:_run_migrations().)
+    posting         JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT applications_user_id_job_id_key UNIQUE (user_id, job_id)

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.db
 @pytest.fixture
 def api(agent_env, monkeypatch):
     corpus.upsert_jobs([{"title": "AI Engineer", "company": "TestCo",
-                         "location": "Remote", "tags": [], "seniority": "Junior",
+                         "location": "Bengaluru, India", "tags": [], "seniority": "Junior",
                          "clean_description": "Build RAG pipelines with FAISS and LLMs.",
                          "apply_link": "https://x/1", "source": "ats"}])
     monkeypatch.setenv("AGENT_MIN_SCORE", "0")

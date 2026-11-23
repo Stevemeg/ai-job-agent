@@ -21,17 +21,22 @@ pytestmark = pytest.mark.db
 PROFILE_HASH, CACHE_KEY = "p" * 64, "1:abcdef012345"
 
 
-def _job(title, company="acme"):
-    return {"title": title, "company": company, "location": "Remote",
-            "tags": [], "experience": "1 years", "seniority": "Junior",
-            "clean_description": f"{title}: RAG with FAISS.",
-            "apply_link": f"https://x/{title}", "source": "ats"}
+def _job(title, company="acme", location="Bengaluru, India", postings=None):
+    job = {"title": title, "company": company, "location": location,
+           "tags": [], "experience": "1 years", "seniority": "Junior",
+           "clean_description": f"{title}: RAG with FAISS.",
+           "apply_link": f"https://x/{title}", "source": "ats"}
+    if postings is not None:
+        job["postings"] = postings
+    return job
 
 
-def _seed(pg, specs):
+def _seed(pg, specs, jobs=None):
     """specs: title -> (score, passed, days_since_seen, profile_hash, cache_key).
+    jobs: title -> the job to upsert (default _job(title)).
     Returns {title: job_id}."""
-    corpus.upsert_jobs([_job(t) for t in specs])
+    jobs = jobs or {}
+    corpus.upsert_jobs([jobs.get(t) or _job(t) for t in specs])
     with pg.begin() as conn:
         ids = dict(conn.execute(text(
             "SELECT title, id FROM canonical_jobs")).all())
@@ -54,10 +59,10 @@ def _spec(score, passed=True, days=0, p_hash=PROFILE_HASH, key=CACHE_KEY):
     return (score, passed, days, p_hash, key)
 
 
-def _triage(user_id, cap=50, min_score=80, age=14):
+def _triage(user_id, cap=50, min_score=80, age=14, policy=None):
     return store.triage(user_id=user_id, profile_hash=PROFILE_HASH,
                         cache_key=CACHE_KEY, min_score=min_score,
-                        max_age_days=age, cap=cap)
+                        max_age_days=age, cap=cap, policy=policy)
 
 
 @pytest.fixture
@@ -79,7 +84,9 @@ def test_triage_applies_score_age_profile_and_cache_key_and_orders_by_score(pg, 
     picked = _triage(user)
     assert [c["title"] for c in picked] == ["H", "A", "B", "T1", "T2", "D"]
     assert picked[0] == {"job_id": ids["H"], "match_score": 99.0, "title": "H",
-                         "company": "acme"}
+                         "company": "acme", "location": "Bengaluru, India",
+                         "apply_link": "https://x/H",
+                         "location_match": "listed_location", "posting": None}
     assert ids["T1"] < ids["T2"]                                   # ties: job id
 
 
@@ -105,6 +112,71 @@ def test_triage_caps_the_batch(pg, user):
     _seed(pg, {f"J{i}": _spec(90 - i) for i in range(8)})
     assert [c["title"] for c in _triage(user, cap=3)] == ["J0", "J1", "J2"]
     assert _triage(user, cap=0) == []
+
+
+def _posting(pid, location):
+    return {"source": "greenhouse", "posting_id": pid, "location": location,
+            "apply_link": f"https://x/posting/{pid}"}
+
+
+def test_triage_keeps_only_location_eligible_jobs(pg, user):
+    jobs = {
+        "blr": _job("blr", location="Bengaluru"),
+        "remote_india": _job("remote_india", location="Remote - India"),
+        "remote": _job("remote", location="Remote"),
+        "remote_us": _job("remote_us", location="Remote - USA"),
+        "sf": _job("sf", location="San Francisco, CA"),
+        "none": _job("none", location=None),
+        # Only a posting qualifies: the application uses that posting.
+        "sf_with_pune": _job("sf_with_pune", location="San Francisco, CA",
+                             postings=[_posting("p1", "Remote, US"),
+                                       _posting("p2", "Pune, Maharashtra")]),
+        "sf_us_postings": _job("sf_us_postings", location="San Francisco",
+                               postings=[_posting("p3", "Remote, US")]),
+    }
+    _seed(pg, {t: _spec(99 - i) for i, t in enumerate(jobs)}, jobs)
+    picked = {c["title"]: c for c in _triage(user)}
+    assert list(picked) == ["blr", "remote_india", "sf_with_pune"]
+    assert picked["blr"]["posting"] is None
+    assert picked["blr"]["apply_link"] == "https://x/blr"
+    via = picked["sf_with_pune"]
+    assert via["posting"]["posting_id"] == "p2"
+    assert (via["location"], via["apply_link"]) == ("Pune, Maharashtra",
+                                                    "https://x/posting/p2")
+
+    # Opting in to global remote admits the remote ones, never San Francisco.
+    from backend.agent.locations import LocationPolicy
+    wide = {c["title"] for c in _triage(user, policy=LocationPolicy(
+        accept_global_remote=True))}
+    assert wide == {"blr", "remote_india", "remote", "remote_us", "sf_with_pune",
+                    "sf_us_postings"}
+
+
+def test_the_cap_counts_eligible_jobs_only(pg, user):
+    jobs = {f"us{i}": _job(f"us{i}", location="Remote - USA") for i in range(5)}
+    jobs.update({f"in{i}": _job(f"in{i}", location="Hyderabad") for i in range(3)})
+    _seed(pg, {"us0": _spec(99), "us1": _spec(98), "us2": _spec(97), "us3": _spec(96),
+               "us4": _spec(95), "in0": _spec(90), "in1": _spec(89), "in2": _spec(88)},
+          jobs)
+    assert [c["title"] for c in _triage(user, cap=2)] == ["in0", "in1"]
+
+
+def test_dispatch_records_the_posting_and_reads_use_it(pg, user):
+    jobs = {"sf": _job("sf", location="San Francisco",
+                       postings=[_posting("p9", "Gurugram")])}
+    ids = _seed(pg, {"sf": _spec(91)}, jobs)
+    [c] = _triage(user)
+    made = store.dispatch(user_id=user, job_id=ids["sf"], match_score=91,
+                          profile_hash=PROFILE_HASH, cache_key=CACHE_KEY,
+                          posting=c["posting"])
+    app = store.get_application(made["application_id"])
+    assert (app["location"], app["apply_link"]) == ("Gurugram", "https://x/posting/p9")
+    loaded = store.load_application(made["application_id"])
+    assert (loaded["location"], loaded["apply_link"]) == ("Gurugram",
+                                                          "https://x/posting/p9")
+    with pg.connect() as conn:
+        stored = conn.execute(text("SELECT posting FROM applications")).scalar()
+    assert stored["posting_id"] == "p9"
 
 
 # ---- dispatch -------------------------------------------------------------------------
@@ -162,6 +234,21 @@ def _run_agent(monkeypatch, **env):
     result = Worker({run_graph.AGENT_RUN_KIND: run_graph.run_agent_run_task},
                     lease_s=30).run_once()
     return task_id, result, taskqueue.get_task(task_id)
+
+
+def test_a_run_honours_agent_locations(agent_env, monkeypatch):
+    corpus.upsert_jobs([
+        {**_job("AI Engineer US", location="Remote - USA"),
+         "clean_description": "Build RAG pipelines with FAISS and LLMs."},
+        {**_job("AI Engineer Pune", location="Pune"),
+         "clean_description": "Build RAG pipelines with FAISS and LLMs."}])
+    _, run, task = _run_agent(monkeypatch)
+    assert run.outcome == "succeeded", run.error
+    assert [d["title"] for d in task["result"]["dispatched"]] == ["AI Engineer Pune"]
+    assert task["result"]["settings"]["accept_global_remote"] is False
+    assert "Pune" in task["result"]["settings"]["locations"]
+    _, run, task = _run_agent(monkeypatch, AGENT_ACCEPT_GLOBAL_REMOTE="true")
+    assert [d["title"] for d in task["result"]["dispatched"]] == ["AI Engineer US"]
 
 
 def test_a_run_refreshes_triages_and_dispatches(agent_env, profile, monkeypatch):

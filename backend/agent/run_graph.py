@@ -9,7 +9,9 @@ run_graph.py -- the agent run (Phase 4, DRY RUN): one LangGraph thread
   changed (every job_scores row current: zero scored). Fixes the profile
   hash and scoring cache key the rest of the run uses.
 - triage: from job_scores for that profile + cache key, the best jobs the
-  agent hasn't touched (store.triage; AGENT_* settings).
+  agent hasn't touched, in a location AGENT_LOCATIONS accepts (store.triage,
+  locations.py; AGENT_* settings). A qualifying posting's apply_link is
+  the application's.
 - dispatch: per job, ONE transaction creates the applications row and
   enqueues its "application" task (idempotency key "application:<id>").
   A re-run (a retried task resumes here) creates no duplicates:
@@ -75,9 +77,12 @@ def build_run_graph(ctx: Any = None):
         candidates = store.triage(
             user_id=state["user_id"], profile_hash=state["profile_hash"],
             cache_key=state["cache_key"], min_score=s.min_score,
-            max_age_days=s.max_job_age_days, cap=s.max_drafts_per_run)
+            max_age_days=s.max_job_age_days, cap=s.max_drafts_per_run,
+            policy=s.location_policy())
         log.info("agent run: %d job(s) triaged (score >= %g, seen within %dd, "
-                 "cap %d)", len(candidates), s.min_score, s.max_job_age_days,
+                 "in %s%s, cap %d)", len(candidates), s.min_score,
+                 s.max_job_age_days, "/".join(s.locations),
+                 " or any remote" if s.accept_global_remote else "",
                  s.max_drafts_per_run)
         return {"candidates": candidates, "settings": s.as_dict()}
 
@@ -89,12 +94,14 @@ def build_run_graph(ctx: Any = None):
             made = store.dispatch(user_id=state["user_id"], job_id=c["job_id"],
                                   match_score=c["match_score"],
                                   profile_hash=state["profile_hash"],
-                                  cache_key=state["cache_key"])
+                                  cache_key=state["cache_key"],
+                                  posting=c.get("posting"))
             if made is None:
                 skipped += 1               # already dispatched (a resumed run)
             else:
                 dispatched.append({**made, "title": c["title"],
-                                   "company": c["company"]})
+                                   "company": c["company"],
+                                   "location": c.get("location")})
         return {"dispatched": dispatched, "skipped_existing": skipped}
 
     g = StateGraph(RunState)

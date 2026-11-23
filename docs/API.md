@@ -115,7 +115,7 @@ The agent drafts a tailored resume and cover letter for the best new jobs. **Not
 **`POST /v1/agent/runs`** queues an `agent_run` task. Its graph, on thread `agent_run:<task_id>`:
 
 1. `refresh_ranking` runs the same incremental rank as `rank` and `scan` tasks, under the rank lock. When nothing changed it scores nothing.
-2. `triage` picks jobs from `job_scores` for the **current** profile and cache key. A job qualifies if it passed the gates, scored at least `AGENT_MIN_SCORE` (80), was seen within `AGENT_MAX_JOB_AGE_DAYS` (14), has no application yet, and has no `applied`, `dismiss` or `declined` event. Best first, at most `AGENT_MAX_DRAFTS_PER_RUN` (5). See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+2. `triage` picks jobs from `job_scores` for the **current** profile and cache key. A job qualifies if it passed the gates, scored at least `AGENT_MIN_SCORE` (80), was seen within `AGENT_MAX_JOB_AGE_DAYS` (14), has no application yet, has no `applied`, `dismiss` or `declined` event, and is in a location `AGENT_LOCATIONS` / `AGENT_ACCEPT_GLOBAL_REMOTE` accept (its own or a posting's; a qualifying posting's `apply_link` becomes the application's). Best first, at most `AGENT_MAX_DRAFTS_PER_RUN` (5). See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
 3. `dispatch` creates, for each job in **one transaction**, the `applications` row (`queued`) and its `application` task (idempotency key `application:<id>`). Re-running never duplicates one, because of `UNIQUE (user_id, job_id)`.
 
 Each `application` task runs the application graph on thread `application:<id>`:

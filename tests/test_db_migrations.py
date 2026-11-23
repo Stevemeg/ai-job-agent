@@ -471,3 +471,67 @@ def test_phase3_database_gains_the_agent_tables_idempotently(pg, monkeypatch):
         assert conn.execute(text("SELECT count(*) FROM applications")).scalar() == 0
         assert conn.execute(text(
             "SELECT count(*) FROM application_artifacts")).scalar() == 0
+
+
+# The agent tables exactly as Phase 4 shipped them (before Phase 5).
+PHASE4_AGENT_TABLES = """
+CREATE TABLE IF NOT EXISTS applications (
+    id              SERIAL PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id          INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    profile_hash    TEXT NOT NULL,
+    cache_key       TEXT NOT NULL,
+    match_score     NUMERIC(5,2),
+    status          TEXT NOT NULL DEFAULT 'queued' CONSTRAINT applications_status_check
+                        CHECK (status IN ('queued', 'drafting', 'drafted',
+                                          'needs_review', 'failed')),
+    thread_id       TEXT NOT NULL UNIQUE,
+    error           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT applications_user_id_job_id_key UNIQUE (user_id, job_id)
+);
+CREATE TABLE IF NOT EXISTS application_artifacts (
+    id              SERIAL PRIMARY KEY,
+    application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL CONSTRAINT application_artifacts_kind_check
+                        CHECK (kind IN ('resume_docx', 'cover_letter_docx',
+                                        'cover_letter_txt', 'jd_requirements')),
+    path            TEXT NOT NULL,
+    sha256          TEXT NOT NULL,
+    report          JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT application_artifacts_application_id_kind_key UNIQUE (application_id, kind)
+);
+"""
+PHASE4_SCHEMA = PHASE3_SCHEMA + PHASE4_AGENT_TABLES
+
+
+def _seed_phase4(pg):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(PHASE4_SCHEMA)
+        conn.execute(text("INSERT INTO users (email) VALUES ('u@x')"))
+        conn.execute(text(
+            "INSERT INTO canonical_jobs (company, title, normalized_title, "
+            "content_hash, location, apply_link) VALUES "
+            "('acme', 'AI Engineer', 'ai engineer', 'h', 'Pune', 'https://x/1'), "
+            "('acme', 'ML Engineer', 'ml engineer', 'h2', 'Pune', 'https://x/2'), "
+            "('acme', 'CV Engineer', 'cv engineer', 'h3', 'Pune', 'https://x/3')"))
+        conn.execute(text(
+            "INSERT INTO applications (user_id, job_id, profile_hash, cache_key, "
+            "match_score, status, thread_id) VALUES "
+            "(1, 1, 'p', 'k', 88.25, 'drafted', 'application:1'), "
+            "(1, 2, 'p', 'k', 70, 'needs_review', 'application:2'), "
+            "(1, 3, 'p', 'k', 60, 'drafting', 'application:3')"))
+
+
+def test_phase4_applications_gain_the_matched_posting(pg, monkeypatch):
+    from backend.agent import store
+    _seed_phase4(pg)
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM applications WHERE posting IS NULL")).scalar() == 3
+    # Reads fall back to the job's own location and link without a posting.
+    app = store.get_application(1)
+    assert (app["location"], app["apply_link"]) == ("Pune", "https://x/1")

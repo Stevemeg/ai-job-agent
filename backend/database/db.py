@@ -303,6 +303,10 @@ class Application(Base):
     status = Column(Text, nullable=False, server_default=text("'queued'"))
     thread_id = Column(Text, nullable=False, unique=True)   # "application:<id>"
     error = Column(Text)                               # why it failed
+    # The posting triage matched on location ({source, posting_id, location,
+    # apply_link}): the application uses its location and apply_link.
+    # NULL: the job's own location matched (agent/locations.py).
+    posting = Column(JSONB(none_as_null=True))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -444,6 +448,9 @@ def _run_migrations(conn=None):
     # concurrent writer ever sees the table unconstrained; the new set is a
     # superset, so existing rows validate). An up-to-date constraint is left
     # alone: re-running never rewrites it (same pg_constraint oid).
+    # Phase 5: the posting triage matched on location (agent/locations.py).
+    conn.execute(text(
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS posting JSONB"))
     if not event_type_check_is_current(_event_type_check_def(conn)):
         conn.execute(text(
             f"ALTER TABLE events DROP CONSTRAINT IF EXISTS {EVENT_TYPE_CHECK_NAME}"))

@@ -25,7 +25,7 @@ LLM_NODES = ("extract_requirements", "tailor_resume", "cover_letter")
 
 def _dispatch_one(env, monkeypatch, n_jobs=1):
     corpus.upsert_jobs([{"title": f"AI Engineer {'I' * (i + 1)}", "company": "TestCo",
-                         "location": "Remote", "tags": [], "seniority": "Junior",
+                         "location": "Bengaluru, India", "tags": [], "seniority": "Junior",
                          "experience": "1 years", "clean_description": JD,
                          "apply_link": f"https://x/{i}", "source": "ats"}
                         for i in range(n_jobs)])

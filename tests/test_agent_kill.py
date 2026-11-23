@@ -55,7 +55,7 @@ def test_a_killed_application_worker_resumes_from_its_last_checkpoint(
         agent_env, monkeypatch, tmp_path):
     pg = agent_env.pg
     corpus.upsert_jobs([{"title": "AI Engineer", "company": "TestCo",
-                         "location": "Remote", "tags": [], "seniority": "Junior",
+                         "location": "Bengaluru, India", "tags": [], "seniority": "Junior",
                          "clean_description": "Build RAG pipelines with FAISS and LLMs.",
                          "apply_link": "https://x/1", "source": "ats"}])
     monkeypatch.setenv("AGENT_MIN_SCORE", "0")
