@@ -1,4 +1,5 @@
--- Schema: users, canonical_jobs, events, tasks, job_scores.
+-- Schema: users, canonical_jobs, events, tasks, job_scores, applications,
+-- application_artifacts.
 --
 -- WHY canonical_jobs exists as a real table (not just JSON):
 -- events need to reference "this exact job" reliably. JSON list entries have
@@ -153,5 +154,48 @@ CREATE TABLE IF NOT EXISTS job_scores (
 CREATE INDEX IF NOT EXISTS idx_job_scores_profile_formula
     ON job_scores (profile_hash, cache_key);
 
+-- v2 agent (Phase 4, backend/agent): one row per job the agent triaged for
+-- a user and drafts a tailored resume + cover letter for. The run graph's
+-- dispatch inserts it in the same transaction as its "application" task;
+-- the application graph (LangGraph thread thread_id) moves it to drafted,
+-- needs_review (any validator flag) or failed (its task died). One per
+-- (user, job), ever. Existing databases get these tables from
+-- db.py:init_db() (create_all).
+CREATE TABLE IF NOT EXISTS applications (
+    id              SERIAL PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id          INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    profile_hash    TEXT NOT NULL,                     -- the profile it was triaged for
+    cache_key       TEXT NOT NULL,                     -- the job_scores cache key of its score
+    match_score     NUMERIC(5,2),                      -- score at triage
+    status          TEXT NOT NULL DEFAULT 'queued' CONSTRAINT applications_status_check
+                        CHECK (status IN ('queued', 'drafting', 'drafted',
+                                          'needs_review', 'failed')),
+    thread_id       TEXT NOT NULL UNIQUE,              -- "application:<id>"
+    error           TEXT,                              -- why it failed
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT applications_user_id_job_id_key UNIQUE (user_id, job_id)
+);
+
+-- The files an application's graph rendered, with their sha256 and the
+-- truthfulness validator's report. One row per (application, kind): a
+-- retried render overwrites it.
+CREATE TABLE IF NOT EXISTS application_artifacts (
+    id              SERIAL PRIMARY KEY,
+    application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL CONSTRAINT application_artifacts_kind_check
+                        CHECK (kind IN ('resume_docx', 'cover_letter_docx',
+                                        'cover_letter_txt', 'jd_requirements')),
+    path            TEXT NOT NULL,                     -- on the worker's disk
+    sha256          TEXT NOT NULL,
+    report          JSONB,                             -- validator output, if any
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT application_artifacts_application_id_kind_key UNIQUE (application_id, kind)
+);
+
 -- Not in this file: APScheduler's job store table (apscheduler_jobs), which
--- the scheduler (python -m backend.scheduler) creates and owns.
+-- the scheduler (python -m backend.scheduler) creates and owns, and
+-- LangGraph's checkpoint tables (checkpoints, checkpoint_blobs,
+-- checkpoint_writes, checkpoint_migrations), which PostgresSaver.setup()
+-- creates and owns (backend/agent/checkpoint.py runs it).

@@ -1,6 +1,6 @@
 """
 db.py — Postgres connection layer + ORM models for users, canonical_jobs,
-events, tasks, and job_scores.
+events, tasks, job_scores, applications and application_artifacts.
 
 Connection string is read from environment variables (see .env.example).
 Never hardcode credentials here -- this file is committed to your repo.
@@ -265,12 +265,81 @@ class JobScore(Base):
                        server_default=func.now())
 
 
+# Phase 4 agent (backend/agent). An application is one job the agent
+# triaged for one user and is drafting documents for:
+#   queued -> drafting -> drafted        (validator found nothing)
+#                      -> needs_review   (any validator flag)
+#                      -> failed         (its task died; error says why)
+APPLICATION_STATUSES = ("queued", "drafting", "drafted", "needs_review", "failed")
+APPLICATION_DONE_STATUSES = ("drafted", "needs_review")
+ARTIFACT_KINDS = ("resume_docx", "cover_letter_docx", "cover_letter_txt",
+                  "jd_requirements")
+
+
+def _in_list(column: str, values) -> str:
+    return "%s IN (%s)" % (column, ", ".join(f"'{v}'" for v in values))
+
+
+class Application(Base):
+    """One agent-drafted application packet (backend/agent). Created by the
+    run graph's dispatch in the same transaction as its "application" task;
+    the application graph (LangGraph thread `thread_id`) moves it through
+    APPLICATION_STATUSES. One per (user, job), ever: triage never offers a
+    job that already has one."""
+    __tablename__ = "applications"
+    __table_args__ = (
+        UniqueConstraint("user_id", "job_id", name="applications_user_id_job_id_key"),
+        CheckConstraint(_in_list("status", APPLICATION_STATUSES),
+                        name="applications_status_check"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(Integer, ForeignKey("canonical_jobs.id", ondelete="CASCADE"),
+                    nullable=False)
+    profile_hash = Column(Text, nullable=False)        # the profile it was triaged for
+    cache_key = Column(Text, nullable=False)           # ...and the scores' cache key
+    match_score = Column(Numeric(5, 2))                # score at triage
+    status = Column(Text, nullable=False, server_default=text("'queued'"))
+    thread_id = Column(Text, nullable=False, unique=True)   # "application:<id>"
+    error = Column(Text)                               # why it failed
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now(), onupdate=func.now())
+
+
+class ApplicationArtifact(Base):
+    """A file the application graph rendered for an application, with its
+    sha256 and the truthfulness validator's report. One row per (application,
+    kind): a retried render overwrites it."""
+    __tablename__ = "application_artifacts"
+    __table_args__ = (
+        UniqueConstraint("application_id", "kind",
+                         name="application_artifacts_application_id_kind_key"),
+        CheckConstraint(_in_list("kind", ARTIFACT_KINDS),
+                        name="application_artifacts_kind_check"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    application_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"),
+                            nullable=False)
+    kind = Column(Text, nullable=False)
+    path = Column(Text, nullable=False)                # absolute, on the worker's disk
+    sha256 = Column(Text, nullable=False)
+    report = Column(JSONB(none_as_null=True))          # validator output, if any
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+
+
 _initialized = False
 
 # pg_advisory_xact_lock key serializing schema setup across processes (API,
 # UI and worker can all start at once against a fresh database).
-# Transaction-scoped: released on commit/rollback.
+# Transaction-scoped: released on commit/rollback. backend/agent/checkpoint.py
+# takes the same key (session-level) around LangGraph's checkpointer setup().
 _MIGRATION_LOCK_KEY = 0x6D696772   # b"migr"
+MIGRATION_LOCK_KEY = _MIGRATION_LOCK_KEY
 
 
 def init_db():

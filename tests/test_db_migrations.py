@@ -122,7 +122,8 @@ ORDER BY indexname
 # must match exactly between schema.sql and the ORM.
 _TASK_INDEXDEFS_SQL = """
 SELECT indexname, indexdef FROM pg_indexes
-WHERE schemaname = current_schema() AND tablename IN ('tasks', 'job_scores')
+WHERE schemaname = current_schema()
+  AND tablename IN ('tasks', 'job_scores', 'applications', 'application_artifacts')
 ORDER BY indexname
 """
 # ...and their constraints (PK, FK with its ON DELETE, CHECKs).
@@ -130,7 +131,7 @@ _V2_CONSTRAINTS_SQL = """
 SELECT c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)
 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
 WHERE t.relnamespace = current_schema()::regnamespace
-  AND t.relname IN ('tasks', 'job_scores')
+  AND t.relname IN ('tasks', 'job_scores', 'applications', 'application_artifacts')
 ORDER BY 1, 2
 """
 
@@ -174,7 +175,8 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
 
     with pg.begin() as conn:
         conn.execute(text(
-            "DROP TABLE job_scores, events, canonical_jobs, users, tasks"))
+            "DROP TABLE application_artifacts, applications, job_scores, events, "
+            "canonical_jobs, users, tasks"))
     monkeypatch.setattr(db, "_initialized", False)
     db.init_db()
     with pg.connect() as conn:
@@ -195,6 +197,15 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
     assert v2_cons_from_orm == v2_cons_from_sql
     assert ("job_scores", "job_scores_pkey",
             "PRIMARY KEY (job_id, profile_hash, cache_key)") in v2_cons_from_sql
+    names = {(t, n) for t, n, _ in v2_cons_from_sql}
+    assert {("applications", "applications_user_id_job_id_key"),
+            ("applications", "applications_status_check"),
+            ("applications", "applications_thread_id_key"),
+            ("applications", "applications_job_id_fkey"),
+            ("application_artifacts", "application_artifacts_application_id_kind_key"),
+            ("application_artifacts", "application_artifacts_kind_check"),
+            ("application_artifacts", "application_artifacts_application_id_fkey"),
+            } <= names
 
 
 # The tasks table exactly as Phase 1 shipped it (before the queue columns).
@@ -405,3 +416,58 @@ def test_phase3_job_scores_is_rekeyed_on_cache_key(pg, monkeypatch):
     assert pkey == "PRIMARY KEY (job_id, profile_hash, cache_key)"
     assert "(profile_hash, cache_key)" in indexdef
     assert rows == [(1, "p1", "1")]          # kept; it just never matches again
+
+
+# A database exactly as Phase 3 left it: today's schema.sql minus the agent
+# tables.
+PHASE3_SCHEMA = SCHEMA_SQL.read_text(encoding="utf-8").split(
+    "-- v2 agent (Phase 4")[0]
+
+
+def test_phase3_database_gains_the_agent_tables_idempotently(pg, monkeypatch):
+    with pg.begin() as conn:
+        conn.exec_driver_sql(PHASE3_SCHEMA)
+        conn.execute(text("INSERT INTO users (email) VALUES ('u@x')"))
+        conn.execute(text(
+            "INSERT INTO canonical_jobs (company, title, normalized_title, "
+            "content_hash) VALUES ('acme', 'AI Engineer', 'ai engineer', 'h'), "
+            "('acme', 'ML Engineer', 'ml engineer', 'h2')"))
+        assert conn.execute(text(
+            "SELECT to_regclass('applications') IS NULL")).scalar()
+    _run_init_twice(monkeypatch)
+
+    def application(status="queued", thread="application:1", job=1):
+        with pg.begin() as conn:
+            return conn.execute(text(
+                "INSERT INTO applications (user_id, job_id, profile_hash, cache_key, "
+                "match_score, status, thread_id) VALUES (1, :j, 'p', 'k', 88.25, :s, :t) "
+                "RETURNING id"), {"s": status, "t": thread, "j": job}).scalar()
+
+    def artifact(kind, app_id=1):
+        with pg.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO application_artifacts (application_id, kind, path, "
+                "sha256, report) VALUES (:a, :k, '/x', 'abc', '{\"ok\": true}')"),
+                {"a": app_id, "k": kind})
+
+    app_id = application()
+    with pytest.raises(IntegrityError):
+        application(thread="application:2")              # UNIQUE (user_id, job_id)
+    with pytest.raises(IntegrityError) as exc:
+        application(status="sent", thread="application:3", job=2)
+    assert "applications_status_check" in str(exc.value)  # status CHECK
+    with pytest.raises(IntegrityError):
+        application(thread="application:1", job=2)        # UNIQUE thread_id
+    assert application(status="needs_review", thread="application:4", job=2)
+    for kind in db.ARTIFACT_KINDS:
+        artifact(kind, app_id)
+    with pytest.raises(IntegrityError):
+        artifact("resume_docx", app_id)                   # UNIQUE (application_id, kind)
+    with pytest.raises(IntegrityError):
+        artifact("email_draft", app_id)                   # kind CHECK
+    with pg.begin() as conn:                              # FK cascades
+        conn.execute(text("DELETE FROM canonical_jobs"))
+    with pg.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM applications")).scalar() == 0
+        assert conn.execute(text(
+            "SELECT count(*) FROM application_artifacts")).scalar() == 0
