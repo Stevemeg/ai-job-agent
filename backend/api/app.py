@@ -18,7 +18,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from ..version import __version__, FORMULA_VERSION
-from .routers import agent, analysis, memories, profile, rankings, scans, tracker
+from .routers import agent, analysis, ltr, memories, profile, rankings, scans, tracker
 
 app = FastAPI(
     title="Universal AI Job Agent API",
@@ -36,6 +36,7 @@ app.include_router(scans.router, prefix="/v1")
 app.include_router(tracker.router, prefix="/v1")
 app.include_router(agent.router, prefix="/v1")
 app.include_router(memories.router, prefix="/v1")
+app.include_router(ltr.router, prefix="/v1")
 
 
 @app.get("/healthz", tags=["meta"])
