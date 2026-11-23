@@ -30,6 +30,7 @@ APPS = [{"id": 1, "title": "AI Engineer", "company": "TestCo", "location": "Pune
 
 
 def test_flag_lines_and_flagged_paragraphs():
+    pytest.importorskip("streamlit")
     from backend.ui.views import inbox
     assert inbox.flag_lines(ARTIFACTS, DOCUMENTS) == [
         "Resume, RAG Medical Copilot: unverified Databricks (original bullets used)",
@@ -39,6 +40,7 @@ def test_flag_lines_and_flagged_paragraphs():
 
 
 def test_edits_from_form_keeps_only_what_changed():
+    pytest.importorskip("streamlit")
     from backend.ui.views import inbox
     same = inbox.edits_from_form(DOCUMENTS, DOCUMENTS["cover_letter_paragraphs"],
                                  {"RAG Medical Copilot": "Built RAG.",
