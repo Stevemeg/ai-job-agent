@@ -103,3 +103,25 @@ def test_sleep_and_the_cross_process_call_log(fake_llm, monkeypatch, tmp_path):
                                                    ("extract_requirements", 2)]
     assert fake_provider.read_call_log(log) == {"extract_requirements": 2}
     assert fake_provider.read_call_log(tmp_path / "missing") == {}
+
+
+def test_ollama_model_env_overrides_only_the_default(monkeypatch):
+    from backend.llm import ollama_provider
+    sent = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"response": "{}"}
+
+    monkeypatch.setattr(ollama_provider.requests, "post",
+                        lambda url, json, timeout: sent.append(json["model"]) or Resp())
+    p = ollama_provider.OllamaProvider()
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    p.generate("x")
+    monkeypatch.setenv("OLLAMA_MODEL", "qwen2.5:1.5b")
+    p.generate("x")
+    p.generate("x", model="mistral")
+    assert sent == ["mistral", "qwen2.5:1.5b", "mistral"]

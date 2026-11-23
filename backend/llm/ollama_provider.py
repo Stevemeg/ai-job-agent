@@ -23,7 +23,9 @@ class OllamaProvider:
 
     def generate(self, prompt: str, model: str | None = None):
         payload = {
-            "model": model or DEFAULT_OLLAMA_MODEL,
+            # OLLAMA_MODEL overrides the default without code changes, as
+            # GROQ_MODEL does for Groq; an explicit model still wins.
+            "model": model or os.environ.get("OLLAMA_MODEL") or DEFAULT_OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": 0.3},

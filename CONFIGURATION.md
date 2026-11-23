@@ -40,6 +40,7 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `GROQ_MODEL` | Secrets / env | `llama-3.3-70b-versatile` | Override Groq model (production-tier IDs only) |
 | `GROQ_TIMEOUT` | env | `120` | Groq request timeout (s) |
 | `OLLAMA_TIMEOUT` | env | `480` | Local Ollama timeout (s); first call loads the model |
+| `OLLAMA_MODEL` | env | `mistral` | Override the local Ollama model (any model you have pulled, e.g. `qwen2.5:1.5b-instruct-fp16`) |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_HOST` / `DB_PORT` | env / `.env` | dev defaults | PostgreSQL connection |
 | `DATABASE_URL` | env | — | Full PostgreSQL URL (Render/Neon); takes priority over `DB_*` |
 | `DB_CONNECT_TIMEOUT` | env | `3` | Seconds the corpus loader waits when probing the database |
