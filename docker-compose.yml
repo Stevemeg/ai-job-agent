@@ -48,6 +48,9 @@ services:
       DB_USER: ${DB_USER:-ai_job_agent}
       DB_PASSWORD: ${DB_PASSWORD:-dev_password_change_me}
       DB_NAME: ${DB_NAME:-ai_job_agent}
+      # Bearer token for the mutating endpoints (decisions included). Set it
+      # before the API is reachable by anyone but you; reads stay open.
+      API_TOKEN: ${API_TOKEN:-}
     ports:
       - "8000:8000"
     volumes:
@@ -71,11 +74,13 @@ services:
   # than that, or Docker SIGKILLs it first (the task is then retried by the
   # next worker once its lease expires).
   #
-  # It also runs the agent's "agent_run" and "application" tasks (Phase 4,
-  # dry run: drafts files under data/applications/, never sends anything).
-  # Drafting needs an LLM: set GROQ_API_KEY in .env (host Ollama isn't
-  # reachable from containers). AGENT_ENABLED=true makes every scan chain
-  # an agent run.
+  # It also runs the agent's tasks: "agent_run" and "application" (drafts
+  # under data/applications/), and "application_decision" / "approval_expiry"
+  # (Phase 5: applies your approve/edit/decline; approving builds a packet
+  # and, with GMAIL_CREDENTIALS_FILE set, ONE Gmail draft -- never sent,
+  # never submitted). Drafting needs an LLM: set GROQ_API_KEY in .env (host
+  # Ollama isn't reachable from containers). AGENT_ENABLED=true makes every
+  # scan chain an agent run.
   worker:
     build: .
     restart: unless-stopped
@@ -93,6 +98,11 @@ services:
       AGENT_MAX_DRAFTS_PER_RUN: ${AGENT_MAX_DRAFTS_PER_RUN:-5}
       AGENT_LOCATIONS: ${AGENT_LOCATIONS:-}                # empty: the built-in Indian city list
       AGENT_ACCEPT_GLOBAL_REMOTE: ${AGENT_ACCEPT_GLOBAL_REMOTE:-false}
+      AGENT_APPROVAL_TTL_DAYS: ${AGENT_APPROVAL_TTL_DAYS:-7}
+      # Gmail drafts (optional): e.g. /app/data/secrets/gmail_client.json,
+      # after `python -m backend.integrations.gmail_auth` on the host.
+      GMAIL_CREDENTIALS_FILE: ${GMAIL_CREDENTIALS_FILE:-}
+      GMAIL_TOKEN_FILE: ${GMAIL_TOKEN_FILE:-}
     volumes:
       - ./data:/app/data          # profile in; ranked_jobs.json and applications/ out
       - models:/models            # embedding model cache, shared with api/ui

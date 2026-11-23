@@ -245,3 +245,90 @@ durability.**
 Consequences: there are two kinds of durable state to operate, task rows
 and checkpoint threads, and nothing prunes old threads yet (Phase 7). Their
 names make each one traceable from the other.
+
+## Addendum (Phase 5): the approval gate
+
+- **Date:** 2026-11-23
+- **Status:** Accepted (Phase 5)
+
+**Interrupt, then complete.** §5's gate is `interrupt({application_id,
+version})` in the application graph, right after `persist`. The
+`application` task does not wait for the person: the interrupt is
+checkpointed (`durability="sync"`) and the task **completes** with
+`state: awaiting_approval`. A decision is data first (an `approvals` row,
+one per (application, version), written in the same transaction as the
+`application_decision` task that applies it) and a graph resume second:
+that task resumes the same thread with `Command(resume=decision)`. The
+queue's ownership split from the Phase 4 addendum holds: the queue decides
+when the resume runs and retries it, and the checkpoint decides where it
+continues. A crash after the resume continues at the node it died in. A
+retried task whose decision was already applied (the thread waits on a
+newer version, or finished) changes nothing. The nodes after the gate make
+no LLM call for approve, decline or expire.
+
+```mermaid
+flowchart LR
+    P[persist] --> A{{await_approval<br/>interrupt}}
+    A -->|approve| E[execute<br/>packet] --> G[email_draft<br/>one Gmail draft, optional] --> X((end))
+    A -->|decline| D[decline] --> X
+    A -->|expire| Y[expire] --> X
+    A -->|edit| R[apply_edit<br/>re-validate] --> RE[render] --> P
+```
+
+- **Versions and conflicts.** `applications.version` is the documents'
+  version: 1 for the first draft, +1 per edit. A decision names the version
+  the person saw; anything but `awaiting_approval` at that version is a 409,
+  and so is a second decision on it (the UNIQUE key). Each version gets its
+  own `approval_expiry` task (`expiry:<id>:<version>`), which records
+  `expire` only if that version is still undecided.
+- **Edits are validated, not regenerated.** Edited paragraphs and bullets
+  go through the same truthfulness validators (guardrail 5), first in the
+  API (a flagged edit is 422 unless acknowledged) and again in the graph on
+  the same checkpointed state. An acknowledged human edit is kept as
+  written, unlike model output, which falls back to the original bullets.
+  Its flags stay in the report and set `needs_review`. The files are
+  re-rendered in place; what a decision approved is the current version.
+- **One driver per thread.** A per-application advisory lock is held for
+  every graph run, so a drafting task still finishing its last step and a
+  decision task never drive the same thread at once.
+
+**Packet vs Gmail.** Execution has two steps with different reach.
+The **packet** is always built: `packet.json` (the approved documents with
+their sha256, the apply link, a job summary, why it matched, the gaps and
+the validator's verdict) is recorded as an artifact and a `packet` action,
+and the application is `ready_to_apply`. It is everything the human needs
+to apply, and the human applies (guardrail 1). The **Gmail draft** is
+optional: only when the JD names a contact address (no-reply, privacy,
+accommodation, support and similar addresses are skipped) and
+`GMAIL_CREDENTIALS_FILE` is set. It is one draft (`email_drafted`): the
+approved letter paragraphs in a fixed template, with both `.docx` files
+attached. The body adds no generated text, so validating the letter covers
+the email too.
+
+**Exactly-once draft.** Gmail has no idempotency key, so the draft gets a
+deterministic `Message-ID: <aja-<application_id>-<version>@ai-job-agent>`
+(and an `X-AJA-Draft-Key` header). The `application_actions` row
+(`gmail_draft`, `pending`, that Message-ID) is **committed before Gmail is
+called**. A retry that finds a pending row searches Gmail for the
+Message-ID first (`rfc822msgid:`, then the newest drafts' headers, because
+search can lag right after a create) and records the draft it finds
+instead of creating another. Only then is the row `done`, with the draft
+id. `tests/test_agent_gmail_kill.py` SIGKILLs a worker after Gmail returns
+and before the row is marked done: the retry finds the draft, and the
+mailbox holds exactly one.
+
+**Drafts only, structurally.** `backend/integrations/gmail.py` exposes
+`create_draft()` and `find_draft_by_message_id()`. Its single HTTP entry
+point refuses any URL outside `users/me/drafts` or containing `/send`,
+and tests assert that no send attribute exists and that the mocked HTTP
+layer never sees a send URL. OAuth is the installed-app flow for one scope,
+`gmail.compose`, over plain HTTPS. The token is stored in
+`data/secrets/gmail_token.json` (gitignored) and refreshes itself.
+
+Consequences: a decision task that dies before its decision was consumed
+(the gate still waits on that version) has its `approvals` row removed so
+the person can decide again. One that dies after leaves the error on the
+application, and a manual retry path is Phase 7 work. Old versions' files
+are overwritten by an edit; the `approvals.edits` history records what
+changed.
+

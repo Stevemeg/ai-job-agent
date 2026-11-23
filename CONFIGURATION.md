@@ -53,6 +53,10 @@ If the key is missing AND Ollama isn't running, document generation shows a frie
 | `AGENT_MAX_DRAFTS_PER_RUN` | env / `.env` (worker) | `5` | Triage: at most this many new applications per run (`0` drafts nothing) |
 | `AGENT_LOCATIONS` | env / `.env` (worker) | `Bengaluru, Bangalore, Hyderabad, Pune, Chennai, Mumbai, Gurgaon, Gurugram, Noida, Delhi, NCR, India` | Triage: comma-separated. A job's location, or one of its postings', must contain one of these as whole words (case and spacing ignored) |
 | `AGENT_ACCEPT_GLOBAL_REMOTE` | env / `.env` (worker) | `false` | Triage: `true` also accepts remote jobs that don't mention India (plain "Remote", "Remote - USA"). Remote jobs that mention India are always accepted |
+| `AGENT_APPROVAL_TTL_DAYS` | env / `.env` (worker) | `7` | An application nobody approves, edits or declines within this many days of its latest draft expires |
+| `GMAIL_CREDENTIALS_FILE` | env / `.env` (worker) | — | Path of a Google OAuth **Desktop app** client JSON. Gmail drafts are on only when this is set |
+| `GMAIL_TOKEN_FILE` | env / `.env` (worker) | `data/secrets/gmail_token.json` | Where the OAuth token is written and read (gitignored) |
+| `API_TOKEN` | env / `.env` (API) | — | When set, every mutating API endpoint needs `Authorization: Bearer <API_TOKEN>` (401 otherwise). Unset: no check, so never expose the API beyond localhost without it |
 
 ## Scheduled scans
 
@@ -75,6 +79,18 @@ Drafts go to `data/applications/<application_id>/`. See [DEPLOYMENT.md](docs/DEP
 ```bash
 AGENT_ENABLED=true AGENT_MIN_SCORE=75 DB_HOST=localhost python -m backend.worker
 ```
+
+## Approvals and Gmail drafts (Phase 5)
+
+Every drafted application waits for you (`awaiting_approval`) in the Streamlit **Inbox** tab or via `POST /v1/applications/{id}/decision` ([API.md](docs/API.md#approval-gate-phase-5)). Approving builds the application packet. Nothing is ever sent or submitted: you apply from the apply link. A version nobody decides on within `AGENT_APPROVAL_TTL_DAYS` (7) expires.
+
+**Gmail drafts (optional).** With `GMAIL_CREDENTIALS_FILE` set, approving an application whose job description names a contact address also creates **one Gmail draft** to it, with the resume and cover letter attached. It is a draft: the agent cannot send it (the Gmail wrapper has no send code at all; the `gmail.compose` scope alone would allow it). To set it up:
+
+1. In Google Cloud, create an OAuth client of type **Desktop app** with the Gmail API enabled, and download its JSON (e.g. to `data/secrets/gmail_client.json`; `data/secrets/` is gitignored).
+2. Authorize once, on a machine with a browser: `GMAIL_CREDENTIALS_FILE=data/secrets/gmail_client.json python -m backend.integrations.gmail_auth`. This asks for the single `gmail.compose` scope and writes `data/secrets/gmail_token.json` (or `GMAIL_TOKEN_FILE`).
+3. Give the worker the same `GMAIL_CREDENTIALS_FILE` (and `GMAIL_TOKEN_FILE` if you moved it). The token refreshes itself.
+
+Without `GMAIL_CREDENTIALS_FILE`, approval stops at the packet (`ready_to_apply`).
 
 ## Job corpus source
 

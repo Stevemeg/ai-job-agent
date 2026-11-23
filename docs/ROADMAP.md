@@ -22,7 +22,7 @@ v2 turns the request-driven v1 pipeline into a durable, scheduled agent. It has 
 
 - **Plan and acceptance criteria:** [V2_PLAN.md](V2_PLAN.md), phases 0–7
 - **Architecture and guardrails:** [ADR-001](adr/ADR-001-v2-always-on-architecture.md)
-- **Branch:** `v2-always-on` · **Current phase:** 3 (scheduled incremental scan), in review
+- **Branch:** `v2-always-on` · **Current phase:** 5 (approval gate + Gmail drafts), in review
 
 ## 📋 Planned — v1.1
 

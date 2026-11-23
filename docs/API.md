@@ -30,11 +30,14 @@ Design rules: routers contain no business logic (every endpoint is a thin adapte
 | GET | `/v1/scans/latest` | `services.scan.scan_status` | The latest scan's state and, once done, its stats |
 | POST | `/v1/agent/runs` | `agent.run_graph.request_agent_run` → worker runs the agent run graph | Queue an agent run: refresh the ranking, triage, dispatch drafts (202). 409 while one is active or with no profile; 503 without a database ([details](#agent-phase-4-dry-run)) |
 | GET | `/v1/agent/runs/latest` | `agent.run_graph.agent_run_status` | The latest agent run's state and, once done, what it triaged and dispatched |
-| GET | `/v1/applications` | `agent.store.list_applications` | Drafted applications, newest first (`status`, `limit`, `offset`) |
-| GET | `/v1/applications/{id}` | `agent.store.get_application` | Status, score, validator reports, task state, artifact list |
-| GET | `/v1/applications/{id}/artifacts/{kind}` | — | Download one drafted file |
+| GET | `/v1/applications` | `agent.store.list_applications` | Drafted applications, newest first (`status`, `limit`, `offset`, `sort=score\|newest`). `?status=awaiting_approval` is best score first |
+| GET | `/v1/applications/{id}` | `agent.store.get_application` | Status, score, validator reports, task state, artifact list; why it matched, the documents' text, the packet, actions and decisions ([details](#approval-gate-phase-5)) |
+| GET | `/v1/applications/{id}/artifacts/{kind}` | — | Download one drafted file (or the packet) |
+| POST | `/v1/applications/{id}/decision` | `agent.decisions.submit_decision` → worker runs `agent.application_graph.run_decision_task` | Approve / decline / edit the version you reviewed (202). 409 if it isn't awaiting approval at that version or was already decided; 422 for a flagged edit without `acknowledge_flags`; 503 without a database ([details](#approval-gate-phase-5)) |
 | GET | `/v1/tracker` | `database.tracker.get_tracked_jobs` | Tracked applications with derived status |
 | POST | `/v1/tracker/events` | `database.events.log_outcome` | Log save/applied/interview/rejected/offer/dismiss |
+
+**Auth.** With `API_TOKEN` set, every mutating endpoint (`POST`/`PUT`) needs `Authorization: Bearer <API_TOKEN>`, else 401. Without it nothing is checked, so **never expose the API beyond localhost or a private network without `API_TOKEN`**. Reads stay unauthenticated even with a token, and they include personal documents (`GET /v1/applications/{id}/artifacts/...`), so keep the API off the public internet either way ([DEPLOYMENT.md](DEPLOYMENT.md#approval-gate-and-gmail-drafts)).
 
 ## Rankings on the task queue
 
@@ -123,15 +126,15 @@ Each `application` task runs the application graph on thread `application:<id>`:
 `load → extract_requirements → tailor_resume → validate_resume → cover_letter → validate_letter → render → persist`
 
 - There is one LLM call per LLM node. The JD requirements are extracted once and used for both documents.
-- The truthfulness validators are the resume engine's, unchanged. A flagged resume project keeps its original bullets, and a flagged letter paragraph is reported. Nothing is regenerated. Any flag makes the status **`needs_review`**; otherwise it is **`drafted`**.
-- The files go to `data/applications/<id>/`: `resume.docx`, `cover_letter.docx`, `cover_letter.txt` and `jd_requirements.json`. `persist` records each one, with its sha256 and validator report, and logs one `drafted` event with the score snapshot, all in one transaction.
+- The truthfulness validators are the resume engine's, unchanged. A flagged resume project keeps its original bullets, and a flagged letter paragraph is reported. Nothing is regenerated. Any flag sets **`needs_review: true`**.
+- The files go to `data/applications/<id>/`: `resume.docx`, `cover_letter.docx`, `cover_letter.txt` and `jd_requirements.json`. `persist` records each one, with its sha256 and validator report, moves the application to **`awaiting_approval`** at version 1, queues its approval expiry and logs one `drafted` event with the score snapshot, all in one transaction. The graph then stops at the approval gate (below) and the task completes.
 - A retried task resumes from its last checkpoint. A worker killed in `tailor_resume` costs one more `tailor_resume` call, and nothing before it runs again. An LLM outage fails the attempt, which is retried with backoff. Once the task is dead, the application is **`failed`** with the error.
 
 ```http
 POST /v1/agent/runs          -> 202 {"state": "running", "task_id": 31, "trigger": "api", "detail": "Task #31 queued, waiting for a worker (attempt 0/3).", ...}
 POST /v1/agent/runs          -> 409 {"detail": "An agent run is already in progress."}
 GET  /v1/agent/runs/latest   -> 200 {"state": "done", "task_id": 31, "result": {"triaged": 2, "dispatched": [{"application_id": 7, "task_id": 32, "job_id": 1204, "match_score": 86.4, "title": "...", "company": "..."}, ...], "skipped_existing": 0, "refresh": {"scored": 0, "skipped_unchanged": 4676, ...}, "profile_hash": "...", "cache_key": "1:3f9c...", "settings": {...}, ...}}
-GET  /v1/applications        -> 200 [{"id": 7, "job_id": 1204, "title": "...", "company": "...", "status": "needs_review", "match_score": 86.4, "error": null, ...}]
+GET  /v1/applications        -> 200 [{"id": 7, "job_id": 1204, "title": "...", "company": "...", "status": "awaiting_approval", "needs_review": true, "version": 1, "match_score": 86.4, "error": null, ...}]
 GET  /v1/applications/7      -> 200 {..., "validator": {"resume": {"ok": false, "projects": [{"project": "...", "ok": false, "flagged": ["Kubernetes"]}, ...]}, "cover_letter": {"ok": true, "paragraphs": []}}, "artifacts": [{"kind": "resume_docx", "sha256": "...", "size_bytes": 10012, "download_url": "/v1/applications/7/artifacts/resume_docx", "report": {...}}, ...], "task": {"task_id": 32, "state": "done", "attempts": 1, ...}}
 GET  /v1/applications/7/artifacts/cover_letter_txt -> 200 text/plain (X-Artifact-SHA256: ...)
 ```
@@ -140,11 +143,47 @@ GET  /v1/applications/7/artifacts/cover_letter_txt -> 200 text/plain (X-Artifact
 |---|---|
 | `queued` | Dispatched; its task is waiting for a worker |
 | `drafting` | The graph is running (or waiting to retry after a failed attempt) |
-| `drafted` | All four files written; the validator flagged nothing |
-| `needs_review` | All four files written; the validator flagged something. Read `validator` before using them |
-| `failed` | The task died; `error` has the last error |
+| `awaiting_approval` | All four files written; waiting for your decision on `version`. `needs_review: true` means the validator flagged something: read `validator` first |
+| `approved` | You approved; the worker is building the packet |
+| `ready_to_apply` | The packet is ready (`packet`): apply yourself from `apply_link` |
+| `email_drafted` | ...and one Gmail draft was created for the JD's contact address (never sent) |
+| `declined` | You declined |
+| `expired` | Nobody decided within `AGENT_APPROVAL_TTL_DAYS` |
+| `failed` | The drafting task died; `error` has the last error |
 
-Artifact kinds are `resume_docx`, `cover_letter_docx`, `cover_letter_txt` and `jd_requirements`. An unknown kind, an application with no such file yet, or a file deleted from disk returns 404. `?status=` must be one of the statuses above (otherwise 422).
+Phase 4's `drafted` and `needs_review` are gone: the migration moved those rows to `awaiting_approval` (with the `needs_review` flag). Artifact kinds are `resume_docx`, `cover_letter_docx`, `cover_letter_txt`, `jd_requirements` and `packet`. An unknown kind, an application with no such file yet, or a file deleted from disk returns 404. `?status=` must be one of the statuses above (otherwise 422).
+
+## Approval gate (Phase 5)
+
+After `persist` the application graph calls LangGraph's `interrupt({application_id, version})`. The thread pauses in the checkpointer and the `application` task **completes** (`result.state = "awaiting_approval"`), so no worker waits for a person. A decision resumes the same thread with `Command(resume=decision)`. **Approve, decline and expire make no LLM call.** Nothing is ever sent or submitted: you apply yourself.
+
+**`POST /v1/applications/{id}/decision`**
+
+```json
+{"action": "approve" | "decline" | "edit",
+ "version": 1,                         // the version you reviewed
+ "reason": "optional text",
+ "edits": {"cover_letter_paragraphs": ["...", "..."],          // the whole body
+           "resume_bullets": {"RAG Medical Copilot": ["...", "..."]}},
+ "acknowledge_flags": false}
+```
+
+In **one transaction** it locks the application, checks it is `awaiting_approval` at `version` (else **409**), inserts the `approvals` row (one per version: a second decision on it is **409** too) and queues an `application_decision` task (key `decision:<approval_id>`). It answers **202** with `{approval_id, task_id, application_id, decision, version, source}`. The worker then:
+
+- **approve:** logs an `approved` event (source `user`), writes `packet.json` (the documents with their sha256, the apply link, a job summary, why it matched, the gaps, the validator verdict) as the `packet` artifact → `ready_to_apply`. If the JD names a contact address (not no-reply / privacy / accommodation / support / ...) **and** Gmail is configured, it creates **one** Gmail draft with both `.docx` files attached → `email_drafted`.
+- **decline:** `declined` plus a `declined` event with your reason.
+- **edit:** your paragraphs and bullets are re-checked by the truthfulness validators (no LLM). If any edited text is flagged, the request is **422** with `{"detail": {"message": ..., "flags": [{"document": "cover_letter", "paragraph": 3, "flags": ["Google"]}, ...]}}` unless `acknowledge_flags` is true. An acknowledged edit is kept as you wrote it, flagged in the report, and sets `needs_review`. The worker re-renders the documents, persists them as **version + 1** (still `awaiting_approval`, with a new expiry) and the graph waits again.
+- **expire:** an `approval_expiry` task (due `AGENT_APPROVAL_TTL_DAYS` after each version is drafted, key `expiry:<id>:<version>`) records `expire` (source `expiry`) only if that version is still awaiting with no decision. The worker then sets `expired` and logs a `declined` event with source `expiry`. Otherwise it does nothing.
+
+```http
+POST /v1/applications/7/decision {"action": "approve", "version": 1}   -> 202 {"approval_id": 3, "task_id": 41, "application_id": 7, "decision": "approve", "version": 1, "source": "user"}
+POST /v1/applications/7/decision {"action": "approve", "version": 1}   -> 409 {"detail": "Version 1 of application 7 already has a decision."}
+POST /v1/applications/8/decision {"action": "edit", "version": 2, ...} -> 409 {"detail": "Application 8 is at version 3, not 2; reload it."}
+POST /v1/applications/9/decision {"action": "edit", "version": 1, "edits": {...}} -> 422 {"detail": {"message": "The edit has unverified claims; ...", "flags": [...]}}
+GET  /v1/applications/7  -> 200 {..., "status": "ready_to_apply", "packet": {"job": {"apply_link": "...", "summary": "..."}, "documents": {...}, "why_match": {...}, "gaps": [...], ...}, "actions": [{"action": "packet", "status": "done", ...}], "approvals": [{"decision": "approve", "source": "user", "application_version": 1, ...}], "documents": {"cover_letter_paragraphs": [...], "resume_projects": [{"title": "...", "bullets": [...]}]}, "match": {"score_breakdown": {...}, "explanation": {"strong_matches": [...], "missing_skills": [...]}}}
+```
+
+The Streamlit **Inbox** tab (database mode only) shows the same queue and calls the same `submit_decision()`.
 
 ## Endpoints (planned)
 
@@ -175,5 +214,5 @@ GET /v1/profile/health
 ## Design Notes
 
 - Ranking and document generation are **async jobs** (returns 202) because they take minutes and must not block a request thread. Ranking runs on the Postgres task queue and the worker (above); the 202 body's `detail` names the task id. Document generation is next.
-- Auth: single-user today (`users` table already exists); JWT planned with multi-user.
+- Auth: single-user today (`users` table already exists). `API_TOKEN` guards the mutating endpoints (above); JWT is planned with multi-user.
 - Versioning: `/v1` prefix from day one; score-formula changes bump a `formula_version` field in responses (the events table already snapshots scores for exactly this reason).

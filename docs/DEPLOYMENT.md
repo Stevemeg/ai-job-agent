@@ -115,7 +115,18 @@ Phase 4 adds two task kinds that the same worker runs: `agent_run`, queued by `P
 - **Files.** Drafts are written to `data/applications/<application_id>/` and recorded with their sha256 in `application_artifacts`. In compose, `./data` is bind-mounted into the worker and the API, so the API serves the worker's files.
 - **Checkpoints.** LangGraph's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) are created by the worker on first use, under the same advisory lock as the app's migrations, in the app's database and schema. They are not in `schema.sql`. Each graph step is committed before the next starts (`durability="sync"`). So a retried task resumes at the node its last attempt died in, and nodes it finished are not run again. Nothing prunes old threads yet.
 - **Failure.** An LLM outage or a failing node fails the attempt, which is retried with backoff like any task. After the last attempt the application is marked `failed` with the error. That also happens when a worker dies on the last attempt and its lease expires.
-- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+- **Turning it on.** `AGENT_ENABLED=true` (and optionally `AGENT_MIN_SCORE`, `AGENT_MAX_JOB_AGE_DAYS`, `AGENT_MAX_DRAFTS_PER_RUN`, `AGENT_LOCATIONS`, `AGENT_ACCEPT_GLOBAL_REMOTE`) in the worker's environment makes every scan chain an agent run. Manual runs work either way. See [CONFIGURATION.md](../CONFIGURATION.md#the-agent-phase-4-dry-run).
+
+## Approval gate and Gmail drafts
+
+Phase 5 adds two more task kinds on the same worker: `application_decision` (queued by a decision from the API or the Inbox, or by an expiry) and `approval_expiry` (queued with every drafted version, due `AGENT_APPROVAL_TTL_DAYS` later). See [API.md](API.md#approval-gate-phase-5).
+
+- **No waiting workers.** An application stops at `interrupt()` and its task completes. Decisions resume the thread later from its checkpoint, so a decision made days later needs no running task. A per-application advisory lock keeps two tasks from driving one thread at once.
+- **Never submits, never sends.** Approving writes the packet (`data/applications/<id>/packet.json`) and, only with Gmail configured and a contact address in the JD, one Gmail **draft**. The human applies.
+- **Exactly one draft.** The `gmail_draft` action row is committed (`pending`, with the Message-ID `<aja-<application_id>-<version>@ai-job-agent>`) before Gmail is called. A worker that dies after Gmail created the draft leaves the row pending; the retry looks the draft up by that Message-ID and records it instead of creating another (`tests/test_agent_gmail_kill.py` SIGKILLs a worker in exactly that window).
+- **Gmail secrets.** The OAuth client JSON and the token live under `data/secrets/` (gitignored). In compose, `./data` is bind-mounted into the worker, so set `GMAIL_CREDENTIALS_FILE=/app/data/secrets/gmail_client.json` in `.env` after authorizing on the host (`python -m backend.integrations.gmail_auth`). The token is a credential for your mailbox: protect `data/secrets/` like a password.
+- **Phase 4 data.** Existing `drafted` / `needs_review` applications become `awaiting_approval` (version 1) on first start, with an expiry task each. Their graph threads ended after `persist`; the first decision moves them onto the gate.
+- **API exposure.** Set `API_TOKEN` before the API is reachable by anyone but you: it guards every mutating endpoint (decisions included). Reads stay open and return your documents, so keep port 8000 on localhost or a private network even with a token. The Streamlit UI has no auth at all.
 
 ## Single-Host Server Deployment (small-team demo)
 
@@ -124,7 +135,7 @@ Phase 4 adds two task kinds that the same worker runs: `agent_run`, queued by `P
                      [ollama serve]        (host, GPU strongly recommended)
 ```
 
-Add before exposing publicly: an auth proxy in front of Streamlit (it has no auth), per-user profile isolation (currently single-profile), and upload size limits.
+Add before exposing publicly: `API_TOKEN` for the API's mutating endpoints (and keep its reads private), an auth proxy in front of Streamlit (it has no auth), per-user profile isolation (currently single-profile), and upload size limits.
 
 ## Production SaaS Path (planned)
 
