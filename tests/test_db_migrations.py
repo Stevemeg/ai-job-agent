@@ -75,14 +75,16 @@ def test_old_constraint_upgraded_idempotently(pg, monkeypatch):
     with pg.connect() as conn:
         types = [r[0] for r in conn.execute(
             text("SELECT event_type FROM events ORDER BY id"))]
-        # exactly one constraint, still under the canonical name
+        # exactly one event_type constraint, still under the canonical name
+        # (plus Phase 5's source check)
         checks = conn.execute(text(
             "SELECT conname FROM pg_constraint c "
             "JOIN pg_class t ON t.oid = c.conrelid "
             "WHERE t.relname = 'events' AND c.contype = 'c' "
-            "AND t.relnamespace = current_schema()::regnamespace")).scalars().all()
+            "AND t.relnamespace = current_schema()::regnamespace "
+            "ORDER BY conname")).scalars().all()
     assert types == ["applied", "approved", "declined", "drafted"]   # old row kept
-    assert checks == [db.EVENT_TYPE_CHECK_NAME]
+    assert checks == [db.EVENT_TYPE_CHECK_NAME, db.EVENT_SOURCE_CHECK_NAME]
 
 
 def test_old_database_gains_v2_columns_and_tasks_table(pg, monkeypatch):
@@ -123,7 +125,8 @@ ORDER BY indexname
 _TASK_INDEXDEFS_SQL = """
 SELECT indexname, indexdef FROM pg_indexes
 WHERE schemaname = current_schema()
-  AND tablename IN ('tasks', 'job_scores', 'applications', 'application_artifacts')
+  AND tablename IN ('tasks', 'job_scores', 'applications', 'application_artifacts',
+                    'approvals', 'application_actions')
 ORDER BY indexname
 """
 # ...and their constraints (PK, FK with its ON DELETE, CHECKs).
@@ -131,7 +134,9 @@ _V2_CONSTRAINTS_SQL = """
 SELECT c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)
 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
 WHERE t.relnamespace = current_schema()::regnamespace
-  AND t.relname IN ('tasks', 'job_scores', 'applications', 'application_artifacts')
+  AND (t.relname IN ('tasks', 'job_scores', 'applications', 'application_artifacts',
+                     'approvals', 'application_actions')
+       OR c.conname = 'events_source_check')
 ORDER BY 1, 2
 """
 
@@ -175,8 +180,8 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
 
     with pg.begin() as conn:
         conn.execute(text(
-            "DROP TABLE application_artifacts, applications, job_scores, events, "
-            "canonical_jobs, users, tasks"))
+            "DROP TABLE application_actions, approvals, application_artifacts, "
+            "applications, job_scores, events, canonical_jobs, users, tasks"))
     monkeypatch.setattr(db, "_initialized", False)
     db.init_db()
     with pg.connect() as conn:
@@ -205,6 +210,14 @@ def test_schema_sql_and_orm_models_stay_in_sync(pg, monkeypatch):
             ("application_artifacts", "application_artifacts_application_id_kind_key"),
             ("application_artifacts", "application_artifacts_kind_check"),
             ("application_artifacts", "application_artifacts_application_id_fkey"),
+            ("approvals", "approvals_application_id_application_version_key"),
+            ("approvals", "approvals_decision_check"),
+            ("approvals", "approvals_source_check"),
+            ("approvals", "approvals_expire_source_check"),
+            ("application_actions", "application_actions_application_id_action_key"),
+            ("application_actions", "application_actions_action_check"),
+            ("application_actions", "application_actions_status_check"),
+            ("events", "events_source_check"),
             } <= names
 
 
@@ -458,7 +471,7 @@ def test_phase3_database_gains_the_agent_tables_idempotently(pg, monkeypatch):
     assert "applications_status_check" in str(exc.value)  # status CHECK
     with pytest.raises(IntegrityError):
         application(thread="application:1", job=2)        # UNIQUE thread_id
-    assert application(status="needs_review", thread="application:4", job=2)
+    assert application(status="awaiting_approval", thread="application:4", job=2)
     for kind in db.ARTIFACT_KINDS:
         artifact(kind, app_id)
     with pytest.raises(IntegrityError):
@@ -510,6 +523,8 @@ PHASE4_SCHEMA = PHASE3_SCHEMA + PHASE4_AGENT_TABLES
 def _seed_phase4(pg):
     with pg.begin() as conn:
         conn.exec_driver_sql(PHASE4_SCHEMA)
+        # events.source is Phase 5 (PHASE3_SCHEMA is today's file's prefix).
+        conn.execute(text("ALTER TABLE events DROP COLUMN source"))
         conn.execute(text("INSERT INTO users (email) VALUES ('u@x')"))
         conn.execute(text(
             "INSERT INTO canonical_jobs (company, title, normalized_title, "
@@ -535,3 +550,106 @@ def test_phase4_applications_gain_the_matched_posting(pg, monkeypatch):
     # Reads fall back to the job's own location and link without a posting.
     app = store.get_application(1)
     assert (app["location"], app["apply_link"]) == ("Pune", "https://x/1")
+
+
+def test_phase4_database_moves_to_the_approval_states_idempotently(pg, monkeypatch):
+    _seed_phase4(pg)
+    _run_init_twice(monkeypatch)
+    with pg.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, status, needs_review, version FROM applications "
+            "ORDER BY id")).all()
+        expiries = conn.execute(text(
+            "SELECT payload, idempotency_key, "
+            "run_after > now() + interval '6 days' AS later FROM tasks "
+            "WHERE kind = 'approval_expiry' ORDER BY id")).all()
+        tables = conn.execute(text(
+            "SELECT to_regclass('approvals') IS NOT NULL, "
+            "to_regclass('application_actions') IS NOT NULL")).one()
+        source_col = conn.execute(text(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+            "current_schema() AND table_name = 'events' AND column_name = 'source'"
+        )).scalar()
+    # drafted -> awaiting, not flagged; needs_review -> awaiting, flagged;
+    # still drafting -> untouched (version 0: nothing drafted yet).
+    assert [tuple(r) for r in rows] == [(1, "awaiting_approval", False, 1),
+                                        (2, "awaiting_approval", True, 1),
+                                        (3, "drafting", False, 0)]
+    # Each migrated row got its approval expiry -- once, despite two runs.
+    assert [(e.payload, e.idempotency_key, e.later) for e in expiries] == [
+        ({"application_id": 1, "version": 1}, "expiry:1:1", True),
+        ({"application_id": 2, "version": 1}, "expiry:2:1", True)]
+    assert tables == (True, True) and source_col == 1
+
+    def status(value, app_id=3):
+        with pg.begin() as conn:
+            conn.execute(text("UPDATE applications SET status = :s WHERE id = :i"),
+                         {"s": value, "i": app_id})
+    for legacy in ("drafted", "needs_review"):
+        with pytest.raises(IntegrityError):
+            status(legacy)
+    for current in db.APPLICATION_STATUSES:
+        status(current)
+    with pg.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO application_artifacts (application_id, kind, path, sha256) "
+            "VALUES (1, 'packet', '/p.json', 'abc')"))
+    with pytest.raises(IntegrityError):
+        with pg.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO events (user_id, job_id, event_type, source) "
+                "VALUES (1, 1, 'declined', 'someone')"))
+
+
+def test_approvals_and_actions_constraints(pg):
+    db.init_db()
+    with pg.begin() as conn:
+        conn.execute(text("INSERT INTO users (email) VALUES ('u@x')"))
+        conn.execute(text(
+            "INSERT INTO canonical_jobs (company, title, normalized_title) "
+            "VALUES ('acme', 'AI Engineer', 'ai engineer')"))
+        conn.execute(text(
+            "INSERT INTO applications (user_id, job_id, profile_hash, cache_key, "
+            "status, thread_id, version) VALUES (1, 1, 'p', 'k', "
+            "'awaiting_approval', 'application:1', 1)"))
+
+    def approval(decision, source, version, ok=True):
+        stmt = text("INSERT INTO approvals (application_id, decision, source, "
+                    "application_version) VALUES (1, :d, :s, :v)")
+        if ok:
+            with pg.begin() as conn:
+                conn.execute(stmt, {"d": decision, "s": source, "v": version})
+            return
+        with pytest.raises(IntegrityError):
+            with pg.begin() as conn:
+                conn.execute(stmt, {"d": decision, "s": source, "v": version})
+
+    approval("edit", "user", 1)
+    approval("approve", "user", 1, ok=False)       # one decision per version
+    approval("approve", "user", 2)
+    approval("expire", "user", 3, ok=False)        # an expiry is never a person's
+    approval("decline", "expiry", 3, ok=False)     # ...and a person never expires
+    approval("send", "user", 3, ok=False)          # decision CHECK
+    approval("expire", "expiry", 3)
+
+    def action(kind, status="pending", ok=True):
+        stmt = text("INSERT INTO application_actions (application_id, action, status) "
+                    "VALUES (1, :a, :s)")
+        if ok:
+            with pg.begin() as conn:
+                conn.execute(stmt, {"a": kind, "s": status})
+            return
+        with pytest.raises(IntegrityError):
+            with pg.begin() as conn:
+                conn.execute(stmt, {"a": kind, "s": status})
+
+    action("packet", "done")
+    action("packet", ok=False)                     # one row per action
+    action("gmail_send", ok=False)                 # there is no send action
+    action("gmail_draft", "sent", ok=False)        # status CHECK
+    action("gmail_draft")
+    with pg.begin() as conn:                       # FK cascades
+        conn.execute(text("DELETE FROM applications"))
+    with pg.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM approvals")).scalar() == 0
+        assert conn.execute(text("SELECT count(*) FROM application_actions")).scalar() == 0

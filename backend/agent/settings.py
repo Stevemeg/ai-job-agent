@@ -14,6 +14,8 @@ every call (a changed .env takes effect with the next run, no restart).
                                       whole words (locations.py)
   AGENT_ACCEPT_GLOBAL_REMOTE  false   triage: true also accepts remote jobs
                                       that don't mention India
+  AGENT_APPROVAL_TTL_DAYS     7       an application nobody approves, edits or
+                                      declines within this many days expires
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ class AgentSettings:
     max_drafts_per_run: int = 5
     locations: tuple[str, ...] = DEFAULT_LOCATIONS
     accept_global_remote: bool = False
+    approval_ttl_days: int = 7
 
     def as_dict(self) -> dict:
         out = asdict(self)
@@ -92,4 +95,6 @@ def settings_from_env(env: dict | None = None) -> AgentSettings:
         locations=_locations(env, defaults.locations),
         accept_global_remote=_bool(env, "AGENT_ACCEPT_GLOBAL_REMOTE",
                                    defaults.accept_global_remote),
+        approval_ttl_days=_number(env, "AGENT_APPROVAL_TTL_DAYS",
+                                  defaults.approval_ttl_days, int, 1),
     )

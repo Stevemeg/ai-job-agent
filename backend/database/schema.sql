@@ -1,5 +1,5 @@
 -- Schema: users, canonical_jobs, events, tasks, job_scores, applications,
--- application_artifacts.
+-- application_artifacts, approvals, application_actions.
 --
 -- WHY canonical_jobs exists as a real table (not just JSON):
 -- events need to reference "this exact job" reliably. JSON list entries have
@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS events (
     -- via the idempotent migration in db.py:_run_migrations().
     note            TEXT,
 
+    -- Who caused an agent event (Phase 5): 'user' (an approval decision
+    -- from the UI/API), 'expiry' (an approval nobody answered within
+    -- AGENT_APPROVAL_TTL_DAYS) or 'agent' (the agent itself, e.g.
+    -- 'drafted'). NULL for v1 and manually logged events. Existing
+    -- databases get it via db.py:_run_migrations().
+    source          TEXT CONSTRAINT events_source_check
+                        CHECK (source IN ('user', 'expiry', 'agent')),
+
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -157,10 +165,16 @@ CREATE INDEX IF NOT EXISTS idx_job_scores_profile_formula
 -- v2 agent (Phase 4, backend/agent): one row per job the agent triaged for
 -- a user and drafts a tailored resume + cover letter for. The run graph's
 -- dispatch inserts it in the same transaction as its "application" task;
--- the application graph (LangGraph thread thread_id) moves it to drafted,
--- needs_review (any validator flag) or failed (its task died). One per
--- (user, job), ever. Existing databases get these tables from
--- db.py:init_db() (create_all).
+-- the application graph (LangGraph thread thread_id) drafts it, then
+-- waits for the user (Phase 5):
+--   queued -> drafting -> awaiting_approval -> approved -> ready_to_apply
+--                      |                    |            -> email_drafted
+--                      |                    -> declined | expired
+--                      -> failed (its drafting task died)
+-- An edit re-drafts in place: still awaiting_approval, version + 1.
+-- One per (user, job), ever. Existing databases get these tables from
+-- db.py:init_db() (create_all); Phase 4 rows in 'drafted'/'needs_review'
+-- are moved to awaiting_approval by db.py:_run_migrations().
 CREATE TABLE IF NOT EXISTS applications (
     id              SERIAL PRIMARY KEY,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -169,10 +183,17 @@ CREATE TABLE IF NOT EXISTS applications (
     cache_key       TEXT NOT NULL,                     -- the job_scores cache key of its score
     match_score     NUMERIC(5,2),                      -- score at triage
     status          TEXT NOT NULL DEFAULT 'queued' CONSTRAINT applications_status_check
-                        CHECK (status IN ('queued', 'drafting', 'drafted',
-                                          'needs_review', 'failed')),
+                        CHECK (status IN ('queued', 'drafting', 'awaiting_approval',
+                                          'approved', 'declined', 'expired',
+                                          'ready_to_apply', 'email_drafted',
+                                          'failed')),
     thread_id       TEXT NOT NULL UNIQUE,              -- "application:<id>"
     error           TEXT,                              -- why it failed
+    needs_review    BOOLEAN NOT NULL DEFAULT false,    -- a validator flagged the current documents
+    -- The documents' version: 0 until the first draft, 1 for it, +1 per
+    -- edit. A decision names the version it was made on (optimistic
+    -- concurrency: a stale one is rejected with 409).
+    version         INTEGER NOT NULL DEFAULT 0,
     -- The job posting triage matched on location ({source, posting_id,
     -- location, apply_link}); its location and apply_link are the
     -- application's. NULL: the job's own location matched. (Phase 5;
@@ -191,12 +212,57 @@ CREATE TABLE IF NOT EXISTS application_artifacts (
     application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     kind            TEXT NOT NULL CONSTRAINT application_artifacts_kind_check
                         CHECK (kind IN ('resume_docx', 'cover_letter_docx',
-                                        'cover_letter_txt', 'jd_requirements')),
+                                        'cover_letter_txt', 'jd_requirements',
+                                        'packet')),
     path            TEXT NOT NULL,                     -- on the worker's disk
     sha256          TEXT NOT NULL,
     report          JSONB,                             -- validator output, if any
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT application_artifacts_application_id_kind_key UNIQUE (application_id, kind)
+);
+
+-- v2 approval gate (Phase 5): one decision per (application, version).
+-- POST /v1/applications/{id}/decision inserts approve / decline / edit
+-- (source 'user') in the same transaction as the "application_decision"
+-- task that resumes the graph; an "approval_expiry" task inserts 'expire'
+-- (source 'expiry') when nobody decided in time. The UNIQUE key is what
+-- makes a second decision on the same version a 409.
+CREATE TABLE IF NOT EXISTS approvals (
+    id                  SERIAL PRIMARY KEY,
+    application_id      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    decision            TEXT NOT NULL CONSTRAINT approvals_decision_check
+                            CHECK (decision IN ('approve', 'decline', 'edit', 'expire')),
+    edits               JSONB,                         -- the requested edits (decision 'edit')
+    reason              TEXT,
+    source              TEXT NOT NULL CONSTRAINT approvals_source_check
+                            CHECK (source IN ('user', 'expiry')),
+    application_version INTEGER NOT NULL,              -- the version decided on
+    decided_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- An expiry is never a person's decision, and a person never "expires".
+    CONSTRAINT approvals_expire_source_check
+        CHECK ((decision = 'expire') = (source = 'expiry')),
+    CONSTRAINT approvals_application_id_application_version_key
+        UNIQUE (application_id, application_version)
+);
+
+-- What executing an approved application did, one row per (application,
+-- action): 'packet' (the application packet the human applies with) and
+-- 'gmail_draft' (one Gmail draft, never sent). A gmail_draft row is
+-- inserted 'pending' with its deterministic Message-ID BEFORE Gmail is
+-- called, so a retry finds an already-created draft by that Message-ID
+-- instead of creating a second one.
+CREATE TABLE IF NOT EXISTS application_actions (
+    id              SERIAL PRIMARY KEY,
+    application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    action          TEXT NOT NULL CONSTRAINT application_actions_action_check
+                        CHECK (action IN ('packet', 'gmail_draft')),
+    status          TEXT NOT NULL DEFAULT 'pending' CONSTRAINT application_actions_status_check
+                        CHECK (status IN ('pending', 'done', 'failed')),
+    external_id     TEXT,                              -- the Gmail draft id
+    message_id      TEXT,                              -- "<aja-<application_id>-<version>@ai-job-agent>"
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT application_actions_application_id_action_key UNIQUE (application_id, action)
 );
 
 -- Not in this file: APScheduler's job store table (apscheduler_jobs), which

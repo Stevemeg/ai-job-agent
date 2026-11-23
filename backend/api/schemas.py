@@ -188,11 +188,15 @@ class ApplicationSummary(BaseModel):
     company: str
     location: Optional[str] = None
     apply_link: Optional[str] = None
-    status: str                    # queued | drafting | drafted | needs_review | failed
+    # queued | drafting | awaiting_approval | approved | declined | expired |
+    # ready_to_apply | email_drafted | failed
+    status: str
     match_score: Optional[float] = None
     error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    needs_review: bool = False     # a validator flagged the current documents
+    version: int = 0               # documents version; decisions name it
 
 
 class ApplicationArtifactInfo(BaseModel):

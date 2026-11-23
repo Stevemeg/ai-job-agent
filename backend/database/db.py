@@ -1,6 +1,7 @@
 """
 db.py — Postgres connection layer + ORM models for users, canonical_jobs,
-events, tasks, job_scores, applications and application_artifacts.
+events, tasks, job_scores, applications, application_artifacts, approvals
+and application_actions.
 
 Connection string is read from environment variables (see .env.example).
 Never hardcode credentials here -- this file is committed to your repo.
@@ -147,6 +148,10 @@ VALID_EVENT_TYPES = CORE_EVENT_TYPES + AGENT_EVENT_TYPES
 
 EVENT_TYPE_CHECK_NAME = "events_event_type_check"
 
+# Who caused an agent event (Phase 5). NULL for v1 / manually logged events.
+EVENT_SOURCES = ("user", "expiry", "agent")
+EVENT_SOURCE_CHECK_NAME = "events_source_check"
+
 
 def event_type_check_sql() -> str:
     """The CHECK body for events.event_type -- single source for the ORM
@@ -158,6 +163,8 @@ class Event(Base):
     __tablename__ = "events"
     __table_args__ = (
         CheckConstraint(event_type_check_sql(), name=EVENT_TYPE_CHECK_NAME),
+        CheckConstraint("source IN (%s)" % ", ".join(f"'{s}'" for s in EVENT_SOURCES),
+                        name=EVENT_SOURCE_CHECK_NAME),
     )
 
     id = Column(Integer, primary_key=True)
@@ -167,6 +174,7 @@ class Event(Base):
     match_score = Column(Numeric(5, 2))
     score_breakdown = Column(JSONB)
     note = Column(Text)          # free-text note (tracker UI); nullable
+    source = Column(Text)        # EVENT_SOURCES for agent events; NULL otherwise
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="events")
@@ -265,15 +273,29 @@ class JobScore(Base):
                        server_default=func.now())
 
 
-# Phase 4 agent (backend/agent). An application is one job the agent
-# triaged for one user and is drafting documents for:
-#   queued -> drafting -> drafted        (validator found nothing)
-#                      -> needs_review   (any validator flag)
-#                      -> failed         (its task died; error says why)
-APPLICATION_STATUSES = ("queued", "drafting", "drafted", "needs_review", "failed")
-APPLICATION_DONE_STATUSES = ("drafted", "needs_review")
+# v2 agent (backend/agent). An application is one job the agent triaged
+# for one user, drafts documents for, and then waits on the user for:
+#   queued -> drafting -> awaiting_approval -> approved -> ready_to_apply
+#                      |   (needs_review:   |            -> email_drafted
+#                      |    any validator   -> declined
+#                      |    flag)           -> expired   (nobody decided in time)
+#                      -> failed             (its drafting task died; error says why)
+# An edit re-drafts in place: still awaiting_approval, at version + 1.
+APPLICATION_STATUSES = ("queued", "drafting", "awaiting_approval", "approved",
+                        "declined", "expired", "ready_to_apply", "email_drafted",
+                        "failed")
+# Drafting finished: a dead drafting task never overwrites these.
+APPLICATION_DONE_STATUSES = ("awaiting_approval", "approved", "declined", "expired",
+                             "ready_to_apply", "email_drafted")
+# Phase 4's final statuses; _run_migrations() moves such rows to
+# awaiting_approval (needs_review = whether they were 'needs_review').
+LEGACY_APPLICATION_STATUSES = ("drafted", "needs_review")
 ARTIFACT_KINDS = ("resume_docx", "cover_letter_docx", "cover_letter_txt",
-                  "jd_requirements")
+                  "jd_requirements", "packet")
+APPROVAL_DECISIONS = ("approve", "decline", "edit", "expire")
+APPROVAL_SOURCES = ("user", "expiry")
+ACTION_KINDS = ("packet", "gmail_draft")
+ACTION_STATUSES = ("pending", "done", "failed")
 
 
 def _in_list(column: str, values) -> str:
@@ -307,6 +329,11 @@ class Application(Base):
     # apply_link}): the application uses its location and apply_link.
     # NULL: the job's own location matched (agent/locations.py).
     posting = Column(JSONB(none_as_null=True))
+    # A validator flagged the current documents (shown in the review packet).
+    needs_review = Column(Boolean, nullable=False, server_default=text("false"))
+    # The documents' version: 0 until drafted, 1 for the first draft, +1 per
+    # edit. Every decision names the version it was made on.
+    version = Column(Integer, nullable=False, server_default=text("0"))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
@@ -334,6 +361,63 @@ class ApplicationArtifact(Base):
     report = Column(JSONB(none_as_null=True))          # validator output, if any
     created_at = Column(TIMESTAMP(timezone=True), nullable=False,
                         server_default=func.now())
+
+
+class Approval(Base):
+    """One decision on one version of an application (Phase 5 approval
+    gate): approve / decline / edit from the user (the decision API) or
+    expire from the approval TTL. UNIQUE (application_id,
+    application_version): a version is decided at most once."""
+    __tablename__ = "approvals"
+    __table_args__ = (
+        UniqueConstraint("application_id", "application_version",
+                         name="approvals_application_id_application_version_key"),
+        CheckConstraint(_in_list("decision", APPROVAL_DECISIONS),
+                        name="approvals_decision_check"),
+        CheckConstraint(_in_list("source", APPROVAL_SOURCES),
+                        name="approvals_source_check"),
+        CheckConstraint("(decision = 'expire') = (source = 'expiry')",
+                        name="approvals_expire_source_check"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    application_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"),
+                            nullable=False)
+    decision = Column(Text, nullable=False)
+    edits = Column(JSONB(none_as_null=True))           # decision 'edit': what changed
+    reason = Column(Text)
+    source = Column(Text, nullable=False)
+    application_version = Column(Integer, nullable=False)
+    decided_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+
+
+class ApplicationAction(Base):
+    """What executing an approved application did: the 'packet' and at
+    most one 'gmail_draft' (never sent). The gmail_draft row is written
+    'pending' with its deterministic Message-ID before Gmail is called, so
+    a retry finds the draft instead of creating a second one."""
+    __tablename__ = "application_actions"
+    __table_args__ = (
+        UniqueConstraint("application_id", "action",
+                         name="application_actions_application_id_action_key"),
+        CheckConstraint(_in_list("action", ACTION_KINDS),
+                        name="application_actions_action_check"),
+        CheckConstraint(_in_list("status", ACTION_STATUSES),
+                        name="application_actions_status_check"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    application_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"),
+                            nullable=False)
+    action = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'pending'"))
+    external_id = Column(Text)                         # the Gmail draft id
+    message_id = Column(Text)                          # RFC 5322 Message-ID
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                        server_default=func.now(), onupdate=func.now())
 
 
 _initialized = False
@@ -372,22 +456,40 @@ def _take_migration_lock(conn):
 _SQL_LITERAL = re.compile(r"'((?:[^']|'')*)'")
 
 
-def event_type_check_is_current(constraint_def):
-    """True if a pg_get_constraintdef() of events_event_type_check allows
-    exactly VALID_EVENT_TYPES. Compares the value set, not the text:
+def check_allows_exactly(constraint_def, column, values):
+    """True if a pg_get_constraintdef() of an `column IN (...)` CHECK
+    allows exactly `values`. Compares the value set, not the text:
     Postgres deparses IN (...) differently for a TEXT column (schema.sql)
     and a VARCHAR one (the ORM), so no single expected string fits both."""
-    if not constraint_def or "event_type" not in constraint_def:
+    if not constraint_def or column not in constraint_def:
         return False
-    values = [v.replace("''", "'") for v in _SQL_LITERAL.findall(constraint_def)]
-    return sorted(values) == sorted(VALID_EVENT_TYPES)
+    found = [v.replace("''", "'") for v in _SQL_LITERAL.findall(constraint_def)]
+    return sorted(found) == sorted(values)
+
+
+def event_type_check_is_current(constraint_def):
+    """True if a pg_get_constraintdef() of events_event_type_check allows
+    exactly VALID_EVENT_TYPES."""
+    return check_allows_exactly(constraint_def, "event_type", VALID_EVENT_TYPES)
+
+
+def _check_def(conn, table, name):
+    return conn.execute(text(
+        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "WHERE c.conrelid = CAST(:table AS regclass) AND c.contype = 'c' "
+        "AND c.conname = :name"), {"table": table, "name": name}).scalar()
 
 
 def _event_type_check_def(conn):
-    return conn.execute(text(
-        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
-        "WHERE c.conrelid = 'events'::regclass AND c.contype = 'c' "
-        "AND c.conname = :name"), {"name": EVENT_TYPE_CHECK_NAME}).scalar()
+    return _check_def(conn, "events", EVENT_TYPE_CHECK_NAME)
+
+
+def _replace_check(conn, table, name, body):
+    # Postgres can't ALTER a CHECK in place: drop and re-add it in the
+    # caller's transaction, so no concurrent writer ever sees the table
+    # unconstrained.
+    conn.execute(text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}"))
+    conn.execute(text(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({body})"))
 
 
 def _column_exists(conn, table, column):
@@ -451,9 +553,49 @@ def _run_migrations(conn=None):
     # Phase 5: the posting triage matched on location (agent/locations.py).
     conn.execute(text(
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS posting JSONB"))
+    _migrate_phase5(conn)
     if not event_type_check_is_current(_event_type_check_def(conn)):
+        _replace_check(conn, "events", EVENT_TYPE_CHECK_NAME, event_type_check_sql())
+
+
+def _migrate_phase5(conn):
+    """Phase 5 (approval gate) on a Phase 4 database. Every step checks
+    first, so re-running changes nothing. approvals and
+    application_actions are new tables: create_all() made them."""
+    # Who caused an agent event.
+    conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS source TEXT"))
+    if _check_def(conn, "events", EVENT_SOURCE_CHECK_NAME) is None:
         conn.execute(text(
-            f"ALTER TABLE events DROP CONSTRAINT IF EXISTS {EVENT_TYPE_CHECK_NAME}"))
-        conn.execute(text(
-            f"ALTER TABLE events ADD CONSTRAINT {EVENT_TYPE_CHECK_NAME} "
-            f"CHECK ({event_type_check_sql()})"))
+            f"ALTER TABLE events ADD CONSTRAINT {EVENT_SOURCE_CHECK_NAME} "
+            f"CHECK ({_in_list('source', EVENT_SOURCES)})"))
+    # The application's review flag and documents version.
+    conn.execute(text(
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS "
+        "needs_review BOOLEAN NOT NULL DEFAULT false"))
+    conn.execute(text(
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS "
+        "version INTEGER NOT NULL DEFAULT 0"))
+    # The new status set. Phase 4's drafted / needs_review rows are
+    # awaiting the user now: version 1 (their one draft), with the flag
+    # carrying what 'needs_review' meant -- and the approval expiry task
+    # every awaiting application gets.
+    name = "applications_status_check"
+    if not check_allows_exactly(_check_def(conn, "applications", name), "status",
+                                APPLICATION_STATUSES):
+        conn.execute(text(f"ALTER TABLE applications DROP CONSTRAINT IF EXISTS {name}"))
+        migrated = conn.execute(text(
+            "UPDATE applications SET needs_review = (status = 'needs_review'), "
+            "status = 'awaiting_approval', version = 1, updated_at = now() "
+            "WHERE status IN ('drafted', 'needs_review') RETURNING id")).scalars().all()
+        conn.execute(text(f"ALTER TABLE applications ADD CONSTRAINT {name} "
+                          f"CHECK ({_in_list('status', APPLICATION_STATUSES)})"))
+        if migrated:
+            from ..agent import store                 # lazy: agent imports db
+            for application_id in migrated:
+                store.enqueue_expiry(application_id, 1, conn=conn)
+    # The packet artifact.
+    name = "application_artifacts_kind_check"
+    if not check_allows_exactly(_check_def(conn, "application_artifacts", name),
+                                "kind", ARTIFACT_KINDS):
+        _replace_check(conn, "application_artifacts", name,
+                       _in_list("kind", ARTIFACT_KINDS))

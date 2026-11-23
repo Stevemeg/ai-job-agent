@@ -1,7 +1,8 @@
 """
 store.py -- the agent's reads and writes: triage, the applications rows,
-their artifacts and the 'drafted' event. Plain SQL over the app's
-SQLAlchemy engine; every write is one short transaction.
+their artifacts, the 'drafted' event and the approval expiry task. Plain
+SQL over the app's SQLAlchemy engine; every write is one short
+transaction.
 """
 from __future__ import annotations
 
@@ -15,6 +16,12 @@ from .locations import LocationPolicy, job_eligibility
 
 APPLICATION_KIND = "application"
 APPLICATION_MAX_ATTEMPTS = 3
+# Phase 5: an application nobody decided on within AGENT_APPROVAL_TTL_DAYS
+# expires (one task per documents version).
+APPROVAL_EXPIRY_KIND = "approval_expiry"
+APPROVAL_EXPIRY_MAX_ATTEMPTS = 3
+# Statuses persist() may (re-)draft from: never after a decision.
+_DRAFTABLE = ("queued", "drafting", "awaiting_approval")
 
 # Events that take a job off the agent's list for good.
 EXCLUDING_EVENTS = ("applied", "dismiss", "declined")
@@ -26,6 +33,33 @@ def application_thread(application_id: int) -> str:
 
 def application_idempotency_key(application_id: int) -> str:
     return f"application:{application_id}"
+
+
+def expiry_idempotency_key(application_id: int, version: int) -> str:
+    return f"expiry:{application_id}:{version}"
+
+
+def _approval_ttl_days() -> int:
+    from .settings import AgentSettings, settings_from_env
+    try:
+        return settings_from_env().approval_ttl_days
+    except ValueError:            # a malformed value never blocks a draft
+        return AgentSettings().approval_ttl_days
+
+
+def enqueue_expiry(application_id: int, version: int, *, conn: Any,
+                   ttl_days: int | None = None) -> int:
+    """Queue the "approval_expiry" task for this version, due in
+    AGENT_APPROVAL_TTL_DAYS (database clock), in the caller's transaction.
+    Keyed "expiry:<application_id>:<version>": once per version."""
+    from .. import taskqueue
+    days = _approval_ttl_days() if ttl_days is None else ttl_days
+    due = conn.execute(text("SELECT now() + make_interval(days => :d)"),
+                       {"d": days}).scalar()
+    return taskqueue.enqueue(
+        APPROVAL_EXPIRY_KIND, {"application_id": application_id, "version": version},
+        idempotency_key=expiry_idempotency_key(application_id, version),
+        run_after=due, max_attempts=APPROVAL_EXPIRY_MAX_ATTEMPTS, conn=conn)
 
 
 def user_for_profile(profile: dict) -> int:
@@ -170,8 +204,9 @@ def load_application(application_id: int) -> dict:
 
 def set_status(application_id: int, status: str, *, error: str | None = None,
                only_if_not_done: bool = False) -> bool:
-    """Move an application to `status`. only_if_not_done: leave a drafted
-    or needs_review application alone. True if a row changed."""
+    """Move an application to `status`. only_if_not_done: leave an
+    application whose drafting finished (APPLICATION_DONE_STATUSES) alone.
+    True if a row changed."""
     sql = ("UPDATE applications SET status = :status, error = :error, "
            "updated_at = now() WHERE id = :id")
     if only_if_not_done:
@@ -187,7 +222,7 @@ def set_status(application_id: int, status: str, *, error: str | None = None,
 
 
 _LOCK_APPLICATION = text("""
-    SELECT status, user_id, job_id, match_score, profile_hash, cache_key
+    SELECT status, user_id, job_id, match_score, profile_hash, cache_key, version
     FROM applications WHERE id = :id FOR UPDATE
 """)
 
@@ -205,25 +240,37 @@ _SCORE_BREAKDOWN = text("""
 """)
 
 _DRAFTED_EVENT = text("""
-    INSERT INTO events (user_id, job_id, event_type, match_score, score_breakdown, note)
-    VALUES (:user_id, :job_id, 'drafted', :match_score, :score_breakdown, :note)
+    INSERT INTO events (user_id, job_id, event_type, match_score, score_breakdown,
+                        note, source)
+    VALUES (:user_id, :job_id, 'drafted', :match_score, :score_breakdown, :note,
+            'agent')
 """).bindparams(bindparam("score_breakdown", type_=JSONB(none_as_null=True)))
 
 
-def persist(application_id: int, artifacts: dict[str, dict], status: str) -> bool:
+class NotDraftable(RuntimeError):
+    """persist() on an application that was already decided on."""
+
+
+def persist(application_id: int, artifacts: dict[str, dict], *,
+            needs_review: bool, version: int) -> bool:
     """One transaction: upsert every artifact by (application_id, kind),
-    set the final status, and log ONE 'drafted' event with the score
-    snapshot. The application row is locked first and the event is only
-    written on the transition into drafted/needs_review, so a retried
-    persist (the worker died after this committed) logs nothing more.
-    Returns True if this call logged the event."""
-    if status not in APPLICATION_DONE_STATUSES:
-        raise ValueError(f"persist() sets a final status, not {status!r}")
+    move the application to awaiting_approval at `version` with its
+    needs_review flag, queue that version's approval expiry, and -- on the
+    first draft only -- log ONE 'drafted' event with the score snapshot.
+    The row is locked first. Setting (not incrementing) the version and
+    keying the expiry on it make a retried persist (the worker died after
+    this committed) change nothing more. Returns True if this call logged
+    the event. NotDraftable once the application was decided on."""
+    if version < 1:
+        raise ValueError(f"a drafted version is >= 1, not {version!r}")
     init_db()
     with get_engine().begin() as conn:
         app = conn.execute(_LOCK_APPLICATION, {"id": application_id}).mappings().first()
         if app is None:
             raise ApplicationNotFound(f"application {application_id} does not exist")
+        if app["status"] not in _DRAFTABLE:
+            raise NotDraftable(f"application {application_id} is {app['status']}; "
+                               "its documents can no longer change")
         first = app["status"] not in APPLICATION_DONE_STATUSES
         for kind, artifact in artifacts.items():
             conn.execute(_UPSERT_ARTIFACT, {
@@ -231,9 +278,11 @@ def persist(application_id: int, artifacts: dict[str, dict], status: str) -> boo
                 "path": artifact["path"], "sha256": artifact["sha256"],
                 "report": artifact.get("report")})
         conn.execute(text(
-            "UPDATE applications SET status = :status, error = NULL, "
-            "updated_at = now() WHERE id = :id"),
-            {"status": status, "id": application_id})
+            "UPDATE applications SET status = 'awaiting_approval', error = NULL, "
+            "needs_review = :needs_review, version = :version, updated_at = now() "
+            "WHERE id = :id"),
+            {"needs_review": needs_review, "version": version, "id": application_id})
+        enqueue_expiry(application_id, version, conn=conn)
         if first:
             breakdown = conn.execute(_SCORE_BREAKDOWN, {
                 "job_id": app["job_id"], "profile_hash": app["profile_hash"],
@@ -242,8 +291,9 @@ def persist(application_id: int, artifacts: dict[str, dict], status: str) -> boo
                 "user_id": app["user_id"], "job_id": app["job_id"],
                 "match_score": app["match_score"], "score_breakdown": breakdown,
                 "note": (f"Agent drafted a tailored resume and cover letter "
-                         f"(application #{application_id}, {status}); "
-                         "nothing was sent.")})
+                         f"(application #{application_id}"
+                         f"{', needs review' if needs_review else ''}); "
+                         "awaiting your approval, nothing was sent.")})
     return first
 
 
@@ -252,8 +302,8 @@ def persist(application_id: int, artifacts: dict[str, dict], status: str) -> boo
 # --------------------------------------------------------------------------
 _LIST = """
     SELECT a.id, a.user_id, a.job_id, a.status, a.match_score, a.profile_hash,
-           a.cache_key, a.thread_id, a.error, a.created_at, a.updated_at,
-           j.title, j.company,
+           a.cache_key, a.thread_id, a.error, a.needs_review, a.version,
+           a.created_at, a.updated_at, j.title, j.company,
            COALESCE(a.posting->>'location', j.location) AS location,
            COALESCE(a.posting->>'apply_link', j.apply_link) AS apply_link
     FROM applications a JOIN canonical_jobs j ON j.id = a.job_id

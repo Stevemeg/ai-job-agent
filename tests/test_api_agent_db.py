@@ -63,7 +63,8 @@ def test_post_runs_and_the_application_endpoints(api, agent_env):
 
     assert worker.run_once().outcome == "succeeded"           # the application
     detail = c.get(f"/v1/applications/{queued['id']}").json()
-    assert detail["status"] == "drafted" and detail["error"] is None
+    assert detail["status"] == "awaiting_approval" and detail["error"] is None
+    assert (detail["needs_review"], detail["version"]) == (False, 1)
     assert detail["match_score"] == pytest.approx(dispatched["match_score"], abs=0.01)
     assert detail["thread_id"] == f"application:{queued['id']}"
     assert detail["task"]["state"] == "done"
@@ -85,8 +86,10 @@ def test_post_runs_and_the_application_endpoints(api, agent_env):
     assert "attachment" in c.get(kinds["resume_docx"]["download_url"]).headers[
         "content-disposition"]
 
-    assert [a["id"] for a in c.get("/v1/applications?status=drafted").json()] == [queued["id"]]
-    assert c.get("/v1/applications?status=needs_review").json() == []
+    assert [a["id"] for a in c.get(
+        "/v1/applications?status=awaiting_approval").json()] == [queued["id"]]
+    assert c.get("/v1/applications?status=approved").json() == []
+    assert c.get("/v1/applications?status=drafted").status_code == 422   # Phase 4 only
     assert c.get("/v1/applications?status=sent").status_code == 422
     assert c.get("/v1/applications/999").status_code == 404
     assert c.get(f"/v1/applications/{queued['id']}/artifacts/email").status_code == 404

@@ -11,13 +11,14 @@ LangGraph thread "application:<application_id>", run by the worker for an
   extracted once and shared through the graph state by both documents.
 - The validators are the resume engine's, unchanged: a flagged resume
   project falls back to its original bullets, a flagged letter paragraph is
-  reported. Nothing is regenerated. Any flag -> 'needs_review', else
-  'drafted'.
+  reported. Nothing is regenerated. Any flag sets needs_review.
 - render writes data/applications/<application_id>/ (resume.docx,
   cover_letter.docx, cover_letter.txt, jd_requirements.json) -- never the
   shared DATA_DIR names the UI and CLIs use.
-- persist upserts the artifacts by (application_id, kind), sets the final
-  status and logs ONE 'drafted' event, in one transaction (idempotent).
+- persist upserts the artifacts by (application_id, kind), moves the
+  application to awaiting_approval (version 1, needs_review = any flag),
+  queues its approval expiry and logs ONE 'drafted' event, in one
+  transaction (idempotent).
 - The handler always invokes the graph on the same thread: a retried task
   resumes at the node the last attempt died in (checkpoint.run_thread).
   An LLM outage (LLMUnavailableError) fails the attempt, so it is retried
@@ -63,6 +64,8 @@ class AppState(TypedDict, total=False):
     letter_review: list
     artifacts: dict
     status: str
+    needs_review: bool
+    version: int
 
 
 def application_dir(application_id: int) -> Path:
@@ -152,7 +155,8 @@ def build_application_graph(ctx: Any = None):
 
     def persist(state: AppState) -> dict:
         resume_report, review = state["resume_report"], state["letter_review"]
-        status = "needs_review" if needs_review(resume_report, review) else "drafted"
+        flagged = needs_review(resume_report, review)
+        version = 1
         resume = {"ok": all(r["ok"] for r in resume_report), "projects": resume_report}
         letter = {"ok": not review, "paragraphs": review}
         reports = {"resume_docx": resume, "cover_letter_docx": letter,
@@ -160,10 +164,14 @@ def build_application_graph(ctx: Any = None):
         artifacts = {kind: {**a, "report": reports[kind]}
                      for kind, a in state["artifacts"].items()}
         lease()
-        logged = store.persist(state["application_id"], artifacts, status)
-        log.info("application %s: %s (%s)", state["application_id"], status,
+        logged = store.persist(state["application_id"], artifacts,
+                               needs_review=flagged, version=version)
+        log.info("application %s: awaiting approval at version %d%s (%s)",
+                 state["application_id"], version,
+                 ", needs review" if flagged else "",
                  "drafted event logged" if logged else "already recorded")
-        return {"status": status}
+        return {"status": "awaiting_approval", "needs_review": flagged,
+                "version": version}
 
     g = StateGraph(AppState)
     nodes = [("load", load), ("extract_requirements", extract_requirements),
@@ -191,6 +199,7 @@ def run_application_task(payload: dict, ctx: Any = None) -> dict:
                        store.application_thread(application_id),
                        {"application_id": application_id})
     return {"application_id": application_id, "status": final["status"],
+            "needs_review": final["needs_review"], "version": final["version"],
             "artifacts": {k: a["sha256"] for k, a in final["artifacts"].items()},
             "resume_flags": sum(not r["ok"] for r in final["resume_report"]),
             "letter_flags": len(final["letter_review"])}
@@ -199,7 +208,7 @@ def run_application_task(payload: dict, ctx: Any = None) -> dict:
 def on_application_dead(payload: dict, error: str | None) -> None:
     """Dead-task hook (the worker calls it once the task has no attempts
     left): the application is 'failed', with the last error's summary. A
-    drafted / needs_review application is never overwritten."""
+    finished draft (APPLICATION_DONE_STATUSES) is never overwritten."""
     from ..services.task_status import error_summary
     application_id = int(payload["application_id"])
     changed = store.set_status(application_id, "failed",

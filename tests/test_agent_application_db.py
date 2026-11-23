@@ -58,6 +58,14 @@ def _llm_calls(env):
     return {k: env.llm.calls[k] for k in LLM_NODES}
 
 
+def _expiry_tasks(pg):
+    with pg.connect() as conn:
+        return conn.execute(text(
+            "SELECT payload, idempotency_key, status, "
+            "round(extract(epoch FROM run_after - now()) / 86400) AS days "
+            "FROM tasks WHERE kind = 'approval_expiry' ORDER BY id")).all()
+
+
 def test_happy_path_drafts_four_artifacts_and_logs_one_event(agent_env, monkeypatch):
     [app_id] = _dispatch_one(agent_env, monkeypatch)
     agent_env.llm.calls.clear()                      # count the application only
@@ -65,7 +73,13 @@ def test_happy_path_drafts_four_artifacts_and_logs_one_event(agent_env, monkeypa
     assert run.outcome == "succeeded", run.error
 
     app = store.get_application(app_id)
-    assert (app["status"], app["error"]) == ("drafted", None)
+    assert (app["status"], app["error"]) == ("awaiting_approval", None)
+    assert (app["needs_review"], app["version"]) == (False, 1)
+    # Its approval expiry, due in AGENT_APPROVAL_TTL_DAYS (7), keyed per version.
+    [expiry] = _expiry_tasks(agent_env.pg)
+    assert expiry.payload == {"application_id": app_id, "version": 1}
+    assert (expiry.idempotency_key, expiry.status, expiry.days) == (
+        f"expiry:{app_id}:1", "queued", 7)
     artifacts = {a["kind"]: a for a in store.get_artifacts(app_id)}
     assert set(artifacts) == {"resume_docx", "cover_letter_docx", "cover_letter_txt",
                               "jd_requirements"}
@@ -86,22 +100,27 @@ def test_happy_path_drafts_four_artifacts_and_logs_one_event(agent_env, monkeypa
     assert (event.user_id, event.job_id) == (app["user_id"], app["job_id"])
     assert float(event.match_score) == app["match_score"]
     assert event.score_breakdown and "nothing was sent" in event.note
+    with agent_env.pg.connect() as conn:
+        assert conn.execute(text(
+            "SELECT source FROM events WHERE event_type = 'drafted'")).scalar() == "agent"
     # One LLM call per LLM node; the requirements were extracted once and
     # shared by both documents.
     assert _llm_calls(agent_env) == {"extract_requirements": 1, "tailor_resume": 1,
                                      "cover_letter": 1}
     task = taskqueue.get_task(run.task_id)
-    assert task["result"]["status"] == "drafted"
+    assert task["result"]["status"] == "awaiting_approval"
+    assert (task["result"]["needs_review"], task["result"]["version"]) == (False, 1)
     assert task["result"]["artifacts"] == {k: a["sha256"] for k, a in artifacts.items()}
 
     # Running it again (a retry after the graph finished): nothing re-runs,
     # nothing is logged twice.
     again = application_graph.run_application_task({"application_id": app_id})
-    assert again["status"] == "drafted"
+    assert again["status"] == "awaiting_approval"
     assert _llm_calls(agent_env) == {"extract_requirements": 1, "tailor_resume": 1,
                                      "cover_letter": 1}
-    assert store.persist(app_id, {}, "drafted") is False     # idempotent
-    assert len(_drafted_events(agent_env.pg)) == 1
+    assert store.persist(app_id, {}, needs_review=False, version=1) is False
+    assert len(_drafted_events(agent_env.pg)) == 1           # idempotent
+    assert len(_expiry_tasks(agent_env.pg)) == 1
 
 
 def test_a_resume_flag_means_needs_review(agent_env, monkeypatch):
@@ -114,7 +133,7 @@ def test_a_resume_flag_means_needs_review(agent_env, monkeypatch):
     agent_env.llm.on("tailor_resume", fabricate)
     assert _app_worker().run_once().outcome == "succeeded"
     app = store.get_application(app_id)
-    assert app["status"] == "needs_review"
+    assert (app["status"], app["needs_review"]) == ("awaiting_approval", True)
     report = {a["kind"]: a["report"] for a in store.get_artifacts(app_id)}["resume_docx"]
     assert report["ok"] is False
     flagged = next(p for p in report["projects"] if not p["ok"])
@@ -127,7 +146,8 @@ def test_a_cover_letter_flag_means_needs_review(agent_env, monkeypatch):
     agent_env.llm.on("cover_letter", lambda prompt, answer: {
         "paragraphs": answer["paragraphs"][:2] + ["I led a Kubernetes team of 12."]})
     assert _app_worker().run_once().outcome == "succeeded"
-    assert store.get_application(app_id)["status"] == "needs_review"
+    app = store.get_application(app_id)
+    assert (app["status"], app["needs_review"]) == ("awaiting_approval", True)
     letter = {a["kind"]: a["report"] for a in store.get_artifacts(app_id)}[
         "cover_letter_txt"]
     assert letter["ok"] is False and letter["paragraphs"][0]["paragraph"] == 3
@@ -163,6 +183,7 @@ def test_an_llm_outage_retries_with_backoff_then_fails_the_application(
     assert store.get_artifacts(app_id) == []
     assert not (agent_env.apps / str(app_id)).exists()
     assert _drafted_events(agent_env.pg) == []
+    assert _expiry_tasks(agent_env.pg) == []
     assert _llm_calls(agent_env) == {"extract_requirements": 3, "tailor_resume": 0,
                                      "cover_letter": 0}
 
@@ -184,7 +205,7 @@ def test_a_retry_resumes_at_the_node_that_failed(agent_env, monkeypatch):
     run = worker.run_once()
     assert run.outcome == "succeeded"
     assert taskqueue.get_task(run.task_id)["attempts"] == 2
-    assert store.get_application(app_id)["status"] == "drafted"
+    assert store.get_application(app_id)["status"] == "awaiting_approval"
     # extract + tailor ran once; only the cover letter node ran again.
     assert _llm_calls(agent_env) == {"extract_requirements": 1, "tailor_resume": 1,
                                      "cover_letter": 2}
@@ -207,4 +228,14 @@ def test_a_dead_task_never_overwrites_a_drafted_application(agent_env, monkeypat
     [app_id] = _dispatch_one(agent_env, monkeypatch)
     assert _app_worker().run_once().outcome == "succeeded"
     application_graph.on_application_dead({"application_id": app_id}, "Boom: late")
-    assert store.get_application(app_id)["status"] == "drafted"
+    assert store.get_application(app_id)["status"] == "awaiting_approval"
+
+
+def test_persist_never_redrafts_a_decided_application(agent_env, monkeypatch):
+    [app_id] = _dispatch_one(agent_env, monkeypatch)
+    assert _app_worker().run_once().outcome == "succeeded"
+    with agent_env.pg.begin() as conn:
+        conn.execute(text("UPDATE applications SET status = 'declined'"))
+    with pytest.raises(store.NotDraftable):
+        store.persist(app_id, {}, needs_review=False, version=2)
+    assert store.get_application(app_id)["version"] == 1

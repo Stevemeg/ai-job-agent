@@ -141,7 +141,8 @@ def test_a_killed_application_worker_resumes_from_its_last_checkpoint(
     assert sorted(r[0] for r in renders) == ["cover_letter.docx", "cover_letter.txt",
                                              "resume_docx"]   # written once
     assert {int(r[1]) for r in renders} == {pid_b}            # all by worker B
-    assert app["status"] == "drafted"
+    assert (app["status"], app["needs_review"], app["version"]) == (
+        "awaiting_approval", False, 1)
     assert len(artifacts) == 4
     for a in artifacts:
         assert a["sha256"] == hashlib.sha256(Path(a["path"]).read_bytes()).hexdigest()
