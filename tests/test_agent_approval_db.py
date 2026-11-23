@@ -401,3 +401,39 @@ def test_a_dead_unconsumed_decision_can_be_made_again(agent_env, monkeypatch):
     assert app["error"].startswith("Your approve could not be applied")
     assert decisions.list_approvals(app_id) == []
     decisions.submit_decision(app_id, action="decline", version=1)   # allowed again
+
+
+# ---- the tracker --------------------------------------------------------------------------------
+
+def test_the_tracker_shows_approved_declined_and_expired(agent_env, monkeypatch, profile):
+    from backend.database.tracker import get_funnel_counts, get_tracked_jobs
+    corpus.upsert_jobs([{"title": title, "company": "TestCo", "location": "Pune",
+                         "tags": [], "seniority": "Junior", "clean_description": JD,
+                         "apply_link": f"https://x/{title}", "source": "ats"}
+                        for title in ("AI Engineer", "ML Engineer", "LLM Engineer")])
+    monkeypatch.setenv("AGENT_MIN_SCORE", "0")
+    run_graph.request_agent_run(trigger="api")
+    worker = Worker(lease_s=30)
+    while worker.run_once() is not None:
+        pass
+    apps = {a["title"]: a["id"] for a in store.list_applications()}
+    assert len(apps) == 3
+    decisions.submit_decision(apps["AI Engineer"], action="approve", version=1)
+    decisions.submit_decision(apps["ML Engineer"], action="decline", version=1,
+                              reason="Wrong stack")
+    decisions.expire_if_unanswered(apps["LLM Engineer"], 1)
+    while worker.run_once() is not None:
+        pass
+
+    tracked = {t["title"]: t for t in get_tracked_jobs(store.user_for_profile(profile))}
+    assert {t: tracked[t]["status"] for t in tracked} == {
+        "AI Engineer": "approved", "ML Engineer": "declined", "LLM Engineer": "expired"}
+    history = {t: [(h["event_type"], h["source"]) for h in tracked[t]["history"]]
+               for t in tracked}                                  # newest first
+    assert history["AI Engineer"] == [("approved", "user"), ("drafted", "agent")]
+    assert history["ML Engineer"] == [("declined", "user"), ("drafted", "agent")]
+    assert history["LLM Engineer"] == [("declined", "expiry"), ("drafted", "agent")]
+    assert "Wrong stack" in tracked["ML Engineer"]["history"][0]["note"]
+    counts = get_funnel_counts(list(tracked.values()))
+    assert (counts["approved"], counts["declined"], counts["expired"]) == (1, 1, 1)
+

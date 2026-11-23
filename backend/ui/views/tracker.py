@@ -24,11 +24,15 @@ STATUS_META = {
     "rejected":  ("Rejected", "red"),
     "dismiss":   ("Dismissed", "gray"),
     "declined":  ("Declined", "gray"),      # v2 agent: suggestion declined
+    "expired":   ("Expired", "gray"),       # v2 agent: no decision in time
 }
+# How the timeline names who caused an agent event.
+SOURCE_LABELS = {"user": "by you", "expiry": "expired: no decision in time",
+                 "agent": "by the agent"}
 # Manual entry only. The v2 agent types (approved/declined/drafted) are
 # logged automatically by the approval gate and deliberately absent here.
 LOGGABLE = ["save", "applied", "interview", "rejected", "offer", "dismiss"]
-HIDDEN_BY_DEFAULT = ("dismiss", "declined")
+HIDDEN_BY_DEFAULT = ("dismiss", "declined", "expired")
 
 
 def _status_meta(status: str) -> tuple[str, str]:
@@ -68,7 +72,8 @@ def render(profile: dict) -> None:
     counts = get_funnel_counts(tracked)
     funnel = [("save", "Saved"), ("approved", "Approved"),
               ("applied", "Applied"), ("interview", "Interviews"),
-              ("offer", "Offers"), ("rejected", "Rejected")]
+              ("offer", "Offers"), ("rejected", "Rejected"),
+              ("declined", "Declined"), ("expired", "Expired")]
     for col, (key, label) in zip(st.columns(len(funnel)), funnel):
         with col:
             theme.card(f'<span class="uja-metric" style="font-size:1.6rem;">'
@@ -123,7 +128,7 @@ def render(profile: dict) -> None:
 
     # ---- board ---------------------------------------------------------------
     active = [t for t in tracked if t["status"] not in HIDDEN_BY_DEFAULT]
-    show_dismissed = st.toggle("Show dismissed / declined", value=False)
+    show_dismissed = st.toggle("Show dismissed / declined / expired", value=False)
     if show_dismissed:
         active = tracked
 
@@ -145,9 +150,11 @@ def render(profile: dict) -> None:
         with st.expander("Timeline"):
             for h in t["history"]:                      # newest first
                 note = f' — <i>{h["note"]}</i>' if h["note"] else ""
+                by = SOURCE_LABELS.get(h.get("source"))
+                by = f' <span class="uja-muted">({by})</span>' if by else ""
                 st.markdown(
                     f'<span class="uja-muted">{h["created_at"]:%d %b %Y %H:%M}'
-                    f'</span> · <b>{h["event_type"]}</b>{note}',
+                    f'</span> · <b>{h["event_type"]}</b>{by}{note}',
                     unsafe_allow_html=True)
             if t.get("apply_link"):
                 st.link_button("Job posting ↗", t["apply_link"])

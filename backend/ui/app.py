@@ -7,7 +7,10 @@ because multipage lists every page in the sidebar and would break the
 
     landing  -> upload + parse resume -> dashboard
     dashboard -> tabs: Overview | Skills | Skill Gaps | Suggestions |
-                       Career Paths | Jobs
+                       Career Paths | Jobs | [Inbox] | Tracker
+
+The Inbox (the agent's applications awaiting approval) only appears when
+Postgres is configured and reachable: the DB-less demo never shows it.
 
 This file only routes and holds layout chrome. Analysis math lives in
 backend/analysis; rendering lives in backend/ui/views; styling in theme.py.
@@ -30,7 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.config import PROFILE_FILE                           # noqa: E402
-from backend.database.corpus import load_corpus_snapshot          # noqa: E402
+from backend.database.corpus import db_available, load_corpus_snapshot  # noqa: E402
 from backend.ui import theme                                      # noqa: E402
 from backend.ui.views import landing, review, analysis, jobs, tracker  # noqa: E402
 
@@ -94,10 +97,13 @@ results = analysis.cached_analysis(profile, corpus.version, all_jobs)
 
 analysis.render_hero(profile, results)
 
-(tab_overview, tab_skills, tab_gaps, tab_suggest, tab_careers, tab_jobs,
- tab_tracker) = st.tabs(
+inbox_on = db_available()          # DB mode only; the demo's tabs are unchanged
+tabs = st.tabs(
     ["Overview", "Skills", "Skill Gaps", "Suggestions", "Career Paths",
-     f"Jobs ({len(all_jobs):,})" if all_jobs else "Jobs", "Tracker"])
+     f"Jobs ({len(all_jobs):,})" if all_jobs else "Jobs"]
+    + (["Inbox"] if inbox_on else []) + ["Tracker"])
+tab_overview, tab_skills, tab_gaps, tab_suggest, tab_careers, tab_jobs = tabs[:6]
+tab_tracker = tabs[-1]
 
 with tab_overview:
     analysis.render_overview(profile, results["health"])
@@ -111,5 +117,9 @@ with tab_careers:
     analysis.render_careers(results["careers"])
 with tab_jobs:
     jobs.render(profile)
+if inbox_on:
+    from backend.ui.views import inbox
+    with tabs[6]:
+        inbox.render(profile)
 with tab_tracker:
     tracker.render(profile)

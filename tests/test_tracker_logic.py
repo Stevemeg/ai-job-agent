@@ -63,9 +63,20 @@ class TestAgentEventTypes:
 
     def test_funnel_counts_include_agent_statuses(self):
         counts = get_funnel_counts([{"status": "approved"},
-                                    {"status": "declined"}])
+                                    {"status": "declined"},
+                                    {"status": "expired"}])
         assert counts["approved"] == 1 and counts["declined"] == 1
+        assert counts["expired"] == 1
         assert counts["save"] == 0
+
+    def test_an_expiry_decline_reads_as_expired(self):
+        from backend.database.tracker import effective_type
+        assert effective_type("declined", "expiry") == "expired"
+        assert effective_type("declined", "user") == "declined"
+        assert effective_type("declined", None) == "declined"
+        assert effective_type("approved", "user") == "approved"
+        assert derive_status(["expired", "drafted"]) == "expired"     # terminal
+        assert derive_status(["applied", "expired"]) == "applied"     # re-engaged
 
 
 @pytest.mark.parametrize("agent_type", ["approved", "declined", "drafted"])

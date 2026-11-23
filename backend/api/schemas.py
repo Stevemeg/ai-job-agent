@@ -293,12 +293,13 @@ class TrackedEvent(BaseModel):
     event_type: str
     created_at: Any
     note: Optional[str] = None
+    source: Optional[str] = None   # agent events: user | expiry | agent
 
 
 class TrackedJob(BaseModel):
     company: str
     title: str
-    status: str
+    status: str                    # ... | approved | declined | expired
     apply_link: Optional[str] = None
     match_score: Optional[float] = None
     last_activity: Any
